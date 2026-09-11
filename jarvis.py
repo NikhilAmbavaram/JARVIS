@@ -8,7 +8,7 @@ import random
 import string
 import time
 
-from brain import Brain
+from brain import Brain, for_speech
 from voice import listen, speak
 from wake import wait_for_wake_word
 
@@ -70,7 +70,7 @@ def conversation(jarvis: Brain):
         except Exception as e:              # API hiccup, no internet, etc. — don't crash the loop
             print(f"⚠️ {e}")
             reply = "Something went wrong on my end, sir."
-        speak(reply)
+        speak(for_speech(reply) or "It's on screen, sir.")   # addresses are printed, not read out
 
 
 def main():

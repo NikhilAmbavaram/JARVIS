@@ -1,7 +1,10 @@
 # tools.py — the things Jarvis can DO (Phase 4 tools + the Phase 5 remember tool)
 
+import base64
+import io
 import os
 import subprocess
+import sys
 from pathlib import Path
 import functools
 import json
@@ -707,6 +710,316 @@ def spotify_control(action: str) -> str:
         return _spotify_error(e)
 
 
+def spotify_now_playing() -> dict:
+    """What's playing, as data for the GUI's Now Playing card. Not a Claude tool."""
+    sp = _spotify()
+    if sp is None:
+        return {"connected": False}
+    try:
+        playback = sp.current_playback()
+    except (spotipy.SpotifyException, spotipy.SpotifyOauthError) as e:
+        return {"connected": True, "error": _spotify_error(e)}
+    item = (playback or {}).get("item")
+    if not item:
+        return {"connected": True, "playing": False, "title": None}
+    album = item.get("album") or {}
+    images = album.get("images") or (item.get("images") or [])   # songs have album art; podcast episodes have their own
+    art = images[1]["url"] if len(images) > 1 else (images[0]["url"] if images else None)  # the 300 px one
+    by = ", ".join(a["name"] for a in item.get("artists", [])) or (item.get("show") or {}).get("name", "")
+    return {
+        "connected": True,
+        "playing": bool(playback.get("is_playing")),
+        "title": item.get("name"),
+        "artist": by,
+        "art": art,
+        "progress_ms": playback.get("progress_ms") or 0,
+        "duration_ms": item.get("duration_ms") or 0,
+        "device": (playback.get("device") or {}).get("name"),
+        "url": (item.get("external_urls") or {}).get("spotify"),
+    }
+
+
+# ---------- The chat window: links and screenshots ----------
+# gui.py sets CHAT_WINDOW = True. After every reply, brain.py collects these lists so the GUI can
+# show links under the reply (instead of Jarvis reading addresses out) and screenshots as thumbnails.
+
+CHAT_WINDOW = False
+GUI_TITLE = "J.A.R.V.I.S"   # the dashboard's own window, never picked for a screenshot
+links_to_show = []          # {"title": ..., "url": ...}
+screenshots_to_show = []    # {"label": ..., "image": "data:image/jpeg;base64,..."}, small copies
+
+
+def show_links(links: list) -> str:
+    """Put links in the chat window (or the terminal) instead of saying them."""
+    good = []
+    for link in links if isinstance(links, list) else []:
+        url = str(link.get("url", "")).strip() if isinstance(link, dict) else ""
+        if re.fullmatch(r"https?://\S+", url):
+            good.append({"title": str(link.get("title") or url).strip()[:120], "url": url})
+    if not good:
+        return "No usable links: each one needs a url starting with https://."
+    links_to_show.extend(good)
+    where = "the chat window" if CHAT_WINDOW else "the terminal"
+    return f"Put {len(good)} link{'s' if len(good) > 1 else ''} in {where}. Don't read the address out; just say where it is."
+
+
+# ---------- Screenshots (Windows) ----------
+# Captures one app window, found by a rough name, or the whole screen, so Claude can look at it.
+# The picture goes to Anthropic like any message does, so this only runs when the user asks.
+
+SHOT_MAX_SIDE = 1568          # Claude sees images best up to about 1568 px on the long side...
+SHOT_MAX_PIXELS = 1_150_000   # ...and about 1.15 megapixels; bigger ones only add delay
+THUMB_MAX_SIDE = 480          # the copy shown in the chat window
+SHOT_FILLER = {"window", "screen", "screenshot", "tab"}   # extra words to ignore in app names
+WHOLE_SCREEN = {"", "whole", "entire", "everything", "desktop", "monitor", "display"}
+
+WINDOW_ALIASES = {            # what people say -> the app's process name (without .exe)
+    "vs code": ["code"], "vscode": ["code"], "visual studio code": ["code"],
+    "browser": ["chrome", "msedge", "firefox", "brave", "opera"], "edge": ["msedge"],
+    "file explorer": ["explorer"], "explorer": ["explorer"], "files": ["explorer"],
+    "terminal": ["windowsterminal", "powershell", "pwsh", "cmd"],
+}
+
+
+class _BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [("biSize", ctypes.c_uint32), ("biWidth", ctypes.c_int32), ("biHeight", ctypes.c_int32),
+                ("biPlanes", ctypes.c_uint16), ("biBitCount", ctypes.c_uint16), ("biCompression", ctypes.c_uint32),
+                ("biSizeImage", ctypes.c_uint32), ("biXPelsPerMeter", ctypes.c_int32),
+                ("biYPelsPerMeter", ctypes.c_int32), ("biClrUsed", ctypes.c_uint32), ("biClrImportant", ctypes.c_uint32)]
+
+
+class _BITMAPINFO(ctypes.Structure):
+    _fields_ = [("bmiHeader", _BITMAPINFOHEADER), ("bmiColors", ctypes.c_uint32 * 3)]
+
+
+class _Win32:
+    """The Windows API calls screenshots need. Argument types are spelled out so 64-bit handles survive."""
+
+    def __init__(self):
+        from ctypes import wintypes as w
+        self.w = w
+        self.user32 = ctypes.WinDLL("user32", use_last_error=True)
+        self.gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+        self.dwmapi = ctypes.WinDLL("dwmapi")
+        self.EnumProc = ctypes.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
+        signatures = {
+            (self.user32, "EnumWindows"): ([self.EnumProc, w.LPARAM], w.BOOL),
+            (self.user32, "IsWindowVisible"): ([w.HWND], w.BOOL),
+            (self.user32, "IsIconic"): ([w.HWND], w.BOOL),
+            (self.user32, "GetWindowTextLengthW"): ([w.HWND], ctypes.c_int),
+            (self.user32, "GetWindowTextW"): ([w.HWND, w.LPWSTR, ctypes.c_int], ctypes.c_int),
+            (self.user32, "GetWindowThreadProcessId"): ([w.HWND, ctypes.POINTER(w.DWORD)], w.DWORD),
+            (self.user32, "GetWindowLongPtrW"): ([w.HWND, ctypes.c_int], ctypes.c_ssize_t),
+            (self.user32, "GetWindowRect"): ([w.HWND, ctypes.POINTER(w.RECT)], w.BOOL),
+            (self.user32, "GetForegroundWindow"): ([], w.HWND),
+            (self.user32, "ShowWindow"): ([w.HWND, ctypes.c_int], w.BOOL),
+            (self.user32, "PrintWindow"): ([w.HWND, w.HDC, w.UINT], w.BOOL),
+            (self.user32, "GetDC"): ([w.HWND], w.HDC),
+            (self.user32, "ReleaseDC"): ([w.HWND, w.HDC], ctypes.c_int),
+            (self.gdi32, "CreateCompatibleDC"): ([w.HDC], w.HDC),
+            (self.gdi32, "CreateCompatibleBitmap"): ([w.HDC, ctypes.c_int, ctypes.c_int], w.HBITMAP),
+            (self.gdi32, "SelectObject"): ([w.HDC, w.HGDIOBJ], w.HGDIOBJ),
+            (self.gdi32, "GetDIBits"): ([w.HDC, w.HBITMAP, w.UINT, w.UINT, ctypes.c_void_p, ctypes.c_void_p, w.UINT],
+                                        ctypes.c_int),
+            (self.gdi32, "DeleteObject"): ([w.HGDIOBJ], w.BOOL),
+            (self.gdi32, "DeleteDC"): ([w.HDC], w.BOOL),
+            (self.dwmapi, "DwmGetWindowAttribute"): ([w.HWND, w.DWORD, ctypes.c_void_p, w.DWORD], ctypes.c_long),
+        }
+        for (dll, name), (argtypes, restype) in signatures.items():
+            function = getattr(dll, name)
+            function.argtypes, function.restype = argtypes, restype
+        try:  # Windows 10 1607 and newer: lets us measure windows in real pixels on scaled displays
+            self.set_dpi = self.user32.SetThreadDpiAwarenessContext
+            self.set_dpi.argtypes, self.set_dpi.restype = [ctypes.c_void_p], ctypes.c_void_p
+        except AttributeError:
+            self.set_dpi = None
+
+
+@functools.lru_cache(maxsize=1)
+def _win32() -> _Win32:
+    return _Win32()
+
+
+def _open_windows() -> list:
+    """(title, process name, handle) for every normal app window, frontmost first."""
+    win = _win32()
+    try:
+        import psutil
+    except ImportError:
+        psutil = None
+    found = []
+
+    def visit(hwnd, _):
+        try:
+            if not win.user32.IsWindowVisible(hwnd):
+                return True
+            length = win.user32.GetWindowTextLengthW(hwnd)
+            if length == 0 or win.user32.GetWindowLongPtrW(hwnd, -20) & 0x80:   # GWL_EXSTYLE has WS_EX_TOOLWINDOW
+                return True
+            cloaked = ctypes.c_int(0)   # suspended Store apps say they're visible but are hidden ("cloaked")
+            win.dwmapi.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked))
+            if cloaked.value:
+                return True
+            title = ctypes.create_unicode_buffer(length + 1)
+            win.user32.GetWindowTextW(hwnd, title, length + 1)
+            if title.value in ("Program Manager", GUI_TITLE):
+                return True
+            pid = win.w.DWORD()
+            win.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            process = ""
+            if psutil:
+                try:
+                    process = Path(psutil.Process(pid.value).name()).stem
+                except (psutil.Error, OSError):
+                    pass
+            found.append((title.value, process, hwnd))
+        except Exception:
+            pass   # one odd window shouldn't stop the search
+        return True
+
+    win.user32.EnumWindows(win.EnumProc(visit), 0)
+    return found
+
+
+def _pick_window(query: str, windows: list):
+    """Rough app name -> (handle, title, None), or (None, None, a message for Claude)."""
+    wanted = " ".join(word for word in _clean(query).split() if word not in SHOT_FILLER)
+    if not windows:
+        return None, None, "There are no open windows to take a screenshot of."
+    names = WINDOW_ALIASES.get(wanted, [wanted.replace(" ", "")])
+    for title, process, hwnd in windows:   # the app's own name ("discord", "chrome") -> its frontmost window
+        if process and process.lower().replace(" ", "") in names:
+            return hwnd, title, None
+    found, message = _pick(wanted, [(f"{title} {process}", (hwnd, title), -i)
+                                    for i, (title, process, hwnd) in enumerate(windows)])
+    if message:
+        if message.startswith("Nothing"):
+            message += " Open windows: " + "; ".join(title for title, _, _ in windows[:12]) + "."
+        return None, None, message
+    return found[0], found[1], None
+
+
+def _window_image(hwnd):
+    """-> (picture of one window, its box on screen), or (None, None). The window draws itself into
+    the picture (PrintWindow), so this works even when other windows are covering it."""
+    from PIL import Image
+    win, w = _win32(), _win32().w
+    previous_dpi = win.set_dpi(ctypes.c_void_p(-4)) if win.set_dpi else None   # -4: per-monitor aware v2
+    minimized = bool(win.user32.IsIconic(hwnd))
+    if minimized:
+        win.user32.ShowWindow(hwnd, 4)   # SW_SHOWNOACTIVATE: restore it without taking the focus
+        time.sleep(0.5)
+    try:
+        outer, frame = w.RECT(), w.RECT()
+        win.user32.GetWindowRect(hwnd, ctypes.byref(outer))
+        # The visible frame, without the invisible resize border Windows 10/11 adds around windows
+        if win.dwmapi.DwmGetWindowAttribute(hwnd, 9, ctypes.byref(frame), ctypes.sizeof(frame)) != 0:
+            frame = outer
+        width, height = outer.right - outer.left, outer.bottom - outer.top
+        if width <= 0 or height <= 0:
+            return None, None
+        screen_dc = win.user32.GetDC(None)
+        memory_dc = win.gdi32.CreateCompatibleDC(screen_dc)
+        bitmap = win.gdi32.CreateCompatibleBitmap(screen_dc, width, height)
+        pixels = ctypes.create_string_buffer(width * height * 4)
+        try:
+            old = win.gdi32.SelectObject(memory_dc, bitmap)
+            win.user32.PrintWindow(hwnd, memory_dc, 2)   # PW_RENDERFULLCONTENT: also works for GPU-drawn apps
+            win.gdi32.SelectObject(memory_dc, old)        # GetDIBits needs the bitmap deselected
+            info = _BITMAPINFO()
+            info.bmiHeader.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+            info.bmiHeader.biWidth, info.bmiHeader.biHeight = width, -height   # negative height: top row first
+            info.bmiHeader.biPlanes, info.bmiHeader.biBitCount = 1, 32
+            copied = win.gdi32.GetDIBits(memory_dc, bitmap, 0, height, pixels, ctypes.byref(info), 0)
+        finally:
+            win.gdi32.DeleteObject(bitmap)
+            win.gdi32.DeleteDC(memory_dc)
+            win.user32.ReleaseDC(None, screen_dc)
+        on_screen = (frame.left, frame.top, frame.right, frame.bottom)
+        if not copied:
+            return None, on_screen   # the caller can still copy it from the screen instead
+        image = Image.frombuffer("RGB", (width, height), pixels, "raw", "BGRX", 0, 1).copy()
+        box = (max(0, frame.left - outer.left), max(0, frame.top - outer.top),
+               min(width, frame.right - outer.left), min(height, frame.bottom - outer.top))
+        if box[2] > box[0] and box[3] > box[1]:
+            image = image.crop(box)
+        return image, on_screen
+    finally:
+        if minimized:
+            win.user32.ShowWindow(hwnd, 7)   # SW_SHOWMINNOACTIVE: minimize it again
+        if previous_dpi:
+            win.set_dpi(previous_dpi)
+
+
+def _is_blank(image) -> bool:
+    """Some apps come out solid black from PrintWindow."""
+    histogram = image.convert("L").histogram()
+    return sum(histogram[:4]) >= 0.98 * sum(histogram)
+
+
+def _grab_from_screen(hwnd, box):
+    """Fallback: bring the window to the front and copy that part of the screen."""
+    from PIL import ImageGrab
+    win = _win32()
+    if win.user32.GetForegroundWindow() != hwnd:
+        win.user32.ShowWindow(hwnd, 6)   # SW_MINIMIZE then SW_RESTORE: the dependable way to bring a window forward
+        win.user32.ShowWindow(hwnd, 9)
+        time.sleep(0.6)
+    return ImageGrab.grab(bbox=box, all_screens=True)
+
+
+def _shrink(image, max_side: int, max_pixels: int = 0):
+    """A copy no bigger than max_side on its long side (and max_pixels in total, if given)."""
+    from PIL import Image
+    scale = min(1.0, max_side / max(image.size))
+    if max_pixels:
+        scale = min(scale, (max_pixels / (image.width * image.height)) ** 0.5)
+    if scale >= 1:
+        return image
+    size = (max(1, int(image.width * scale)), max(1, int(image.height * scale)))
+    return image.resize(size, Image.Resampling.LANCZOS)
+
+
+def _jpeg_base64(image, quality: int) -> str:
+    buffer = io.BytesIO()
+    image.convert("RGB").save(buffer, "JPEG", quality=quality)
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def _for_claude(image, label: str) -> list:
+    """The screenshot as content blocks Claude can look at, plus a small copy for the chat window."""
+    big = _shrink(image, SHOT_MAX_SIDE, SHOT_MAX_PIXELS)
+    small = _shrink(image, THUMB_MAX_SIDE)
+    screenshots_to_show.append({"label": label, "image": "data:image/jpeg;base64," + _jpeg_base64(small, 80)})
+    shown = " It's also shown in the user's chat window." if CHAT_WINDOW else ""
+    return [
+        {"type": "text", "text": f"Screenshot of {label} ({big.width}x{big.height}).{shown}"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": _jpeg_base64(big, 85)}},
+    ]
+
+
+def screenshot(app: str = ""):
+    """Screenshot an app window (rough name) or the whole screen, so Claude can see it."""
+    if sys.platform != "win32":
+        return "Screenshots only work on Windows."
+    try:
+        from PIL import ImageGrab
+    except ImportError:
+        return "Screenshots need Pillow. The user can install it with: pip install pillow"
+    words = [word for word in _clean(app or "").split() if word not in SHOT_FILLER]
+    if all(word in WHOLE_SCREEN for word in words):
+        return _for_claude(ImageGrab.grab(), "the whole screen")   # the main monitor
+    hwnd, title, message = _pick_window(app, _open_windows())
+    if message:
+        return message
+    image, box = _window_image(hwnd)
+    if (image is None or _is_blank(image)) and box:
+        image = _grab_from_screen(hwnd, box)
+    if image is None:
+        return f"I couldn't capture '{title}'. It may be hidden in the system tray."
+    return _for_claude(image, f"the {title} window")
+
+
 # ---------- The schema Claude reads ----------
 # This tells Claude what tools exist, what they do, and their inputs.
 
@@ -915,6 +1228,47 @@ TOOL_SCHEMA = [
         },
     },
     {
+        "name": "show_links",
+        "description": (
+            "Put links in the user's chat window instead of saying them. Use it whenever a link would help: "
+            "a page they asked for, documentation, a download page, a video. Never read web addresses aloud; "
+            "after calling this, just say the link is in the chat. Sources you cite from web search appear "
+            "in the chat automatically, so don't repeat those here."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "links": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string", "description": "Short name for the link"},
+                            "url": {"type": "string", "description": "Full address starting with https://"},
+                        },
+                        "required": ["title", "url"],
+                    },
+                },
+            },
+            "required": ["links"],
+        },
+    },
+    {
+        "name": "screenshot",
+        "description": (
+            "Take a screenshot so you can see what's on the user's PC and answer questions about it. Give a "
+            "rough app name (e.g. 'discord', 'chrome', 'vs code', 'spotify') to capture that app's window, or "
+            "leave app empty for the whole screen. Only use it when the user asks you to look at their screen "
+            "or an app. If it replies that several windows could match, ask which one."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "app": {"type": "string", "description": "Rough app or window name; empty for the whole screen"},
+            },
+        },
+    },
+    {
         "name": "remember",
         "description": (
             "Save a fact about the user to long-term memory so you still know it in future "
@@ -951,6 +1305,8 @@ TOOL_FUNCTIONS = {
     "spotify_play": spotify_play,
     "spotify_queue": spotify_queue,
     "spotify_control": spotify_control,
+    "show_links": show_links,
+    "screenshot": screenshot,
     "remember": remember,
 }
 

@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>J.A.R.V.I.S</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='27' fill='none' stroke='%23a855f7' stroke-width='5'/%3E%3Ccircle cx='32' cy='32' r='13' fill='%23c084fc'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700&family=Outfit:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/ui/style.css">
+</head>
+<body>
+  <!-- Icons, drawn once and reused with <use href="#i-name"> -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+      <symbol id="i-thermo" viewBox="0 0 24 24"><path d="M10 13.5V5a2 2 0 1 1 4 0v8.5a4 4 0 1 1-4 0Z"/><path d="M12 9v6"/></symbol>
+      <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></symbol>
+      <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1.5"/><path d="M10 3v3M14 3v3M10 18v3M14 18v3M3 10h3M3 14h3M18 10h3M18 14h3"/></symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.3-4.9L4 8"/><path d="M4 3v5h5"/><path d="M4 13a8 8 0 0 0 14.3 4.9L20 16"/><path d="M20 21v-5h-5"/></symbol>
+      <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18h10a4 4 0 0 0 .5-7.97A6 6 0 0 0 6.1 9.2 4.5 4.5 0 0 0 7 18Z"/></symbol>
+      <symbol id="i-music" viewBox="0 0 24 24"><path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></symbol>
+      <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></symbol>
+      <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8"/></symbol>
+      <symbol id="i-mic-off" viewBox="0 0 24 24"><path d="M15 9.3V6a3 3 0 0 0-5.7-1.3M9 9v2a3 3 0 0 0 5.1 2.1M5 11a7 7 0 0 0 11.6 5.3M19 11a7 7 0 0 1-.6 2.8M12 18v3M8 21h8M3 3l18 18"/></symbol>
+      <symbol id="i-keyboard" viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6.5 10h.01M10.5 10h.01M14.5 10h.01M18 10h.01M7 14h10"/></symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2"/></symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9.5 7V4.5h5V7M6.5 7l1 13h9l1-13M10 11v5M14 11v5"/></symbol>
+      <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></symbol>
+      <symbol id="i-send" viewBox="0 0 24 24"><path d="M21 3 10.5 13.5"/><path d="m21 3-6.5 18-4-7.5L3 9.5 21 3Z"/></symbol>
+      <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3.1-3.1a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3.1 3.1a4 4 0 0 0 5.7 5.7l1-1"/></symbol>
+      <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5L8 5.5Z" fill="currentColor"/></symbol>
+      <symbol id="i-pause" viewBox="0 0 24 24"><rect x="7" y="5.5" width="3.2" height="13" rx="1" fill="currentColor"/><rect x="13.8" y="5.5" width="3.2" height="13" rx="1" fill="currentColor"/></symbol>
+      <symbol id="i-next" viewBox="0 0 24 24"><path d="M6 6l9 6-9 6V6Z" fill="currentColor"/><path d="M18 6v12"/></symbol>
+      <symbol id="i-prev" viewBox="0 0 24 24"><path d="M18 6l-9 6 9 6V6Z" fill="currentColor"/><path d="M6 6v12"/></symbol>
+      <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+      <symbol id="w-clear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M4.6 4.6l1.6 1.6M17.8 17.8l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.6 19.4l1.6-1.6M17.8 6.2l1.6-1.6"/></symbol>
+      <symbol id="w-night" viewBox="0 0 24 24"><path d="M19.5 14.5A7.5 7.5 0 1 1 9.5 4.5a6 6 0 0 0 10 10Z"/></symbol>
+      <symbol id="w-partly" viewBox="0 0 24 24"><path d="M8 3.5v1.5M3.5 8H5M4.8 4.8l1 1M11.2 4.8l-1 1"/><path d="M5.3 11A3.5 3.5 0 0 1 11.5 7"/><path d="M9 20h8a3.5 3.5 0 0 0 .4-7 5 5 0 0 0-9.5-.8A3.9 3.9 0 0 0 9 20Z"/></symbol>
+      <symbol id="w-cloudy" viewBox="0 0 24 24"><path d="M7 18.5h10a4 4 0 0 0 .5-7.97A6 6 0 0 0 6.1 9.7 4.4 4.4 0 0 0 7 18.5Z"/></symbol>
+      <symbol id="w-fog" viewBox="0 0 24 24"><path d="M6 10.5a5 5 0 0 1 9.6-1.8A3.5 3.5 0 0 1 18 14H6.5"/><path d="M4 17h16M7 20.5h10"/></symbol>
+      <symbol id="w-rain" viewBox="0 0 24 24"><path d="M7 15h10a3.8 3.8 0 0 0 .5-7.5A5.7 5.7 0 0 0 6.6 6.8 4.2 4.2 0 0 0 7 15Z"/><path d="M8.5 18l-1 2.5M12.5 18l-1 2.5M16.5 18l-1 2.5"/></symbol>
+      <symbol id="w-snow" viewBox="0 0 24 24"><path d="M7 15h10a3.8 3.8 0 0 0 .5-7.5A5.7 5.7 0 0 0 6.6 6.8 4.2 4.2 0 0 0 7 15Z"/><path d="M8 18.5h.01M12 20h.01M16 18.5h.01M10 21.5h.01M14 21.5h.01"/></symbol>
+      <symbol id="w-storm" viewBox="0 0 24 24"><path d="M7 15h1.5M15.5 15H17a3.8 3.8 0 0 0 .5-7.5A5.7 5.7 0 0 0 6.6 6.8 4.2 4.2 0 0 0 7 15"/><path d="m12.5 12-2.5 4.5h4L11.5 21"/></symbol>
+    </defs>
+  </svg>
+
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-name">J.A.R.V.I.S</span>
+        <span class="badge offline" id="link-badge"><i class="dot"></i><span id="link-text">Connecting</span></span>
+      </div>
+
+      <div class="clock-pill" aria-label="Current time">
+        <svg class="icon"><use href="#i-clock"/></svg>
+        <span class="mono" id="clock-time">--:--:--</span>
+        <span class="divider"></span>
+        <span id="clock-date">&nbsp;</span>
+      </div>
+
+      <div class="top-actions">
+        <div class="chip" id="weather-chip" title="Weather">
+          <svg class="icon"><use href="#i-thermo"/></svg>
+          <span class="mono" id="chip-temp">--°</span>
+          <span class="chip-city" id="chip-city"></span>
+        </div>
+        <button class="icon-btn" id="settings-btn" type="button" title="Settings" aria-label="Settings">
+          <svg class="icon"><use href="#i-sliders"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="side">
+        <section class="card" aria-labelledby="stats-title">
+          <div class="card-head">
+            <svg class="icon"><use href="#i-cpu"/></svg>
+            <h2 id="stats-title">System Stats</h2>
+            <button class="mini-btn" type="button" data-refresh="stats" title="Refresh" aria-label="Refresh system stats">
+              <svg class="icon"><use href="#i-refresh"/></svg>
+            </button>
+          </div>
+          <div class="card-body">
+            <div class="meter">
+              <div class="meter-row"><span>CPU Usage</span><span class="mono" id="cpu-text">–</span></div>
+              <div class="bar"><i id="cpu-bar"></i></div>
+            </div>
+            <div class="meter">
+              <div class="meter-row"><span>RAM Usage</span><span class="mono" id="ram-text">–</span></div>
+              <div class="bar"><i id="ram-bar"></i></div>
+            </div>
+            <div class="tiles">
+              <div class="tile"><span>CPU</span><b id="tile-cpu">–</b></div>
+              <div class="tile"><span>Memory</span><b id="tile-mem">–</b></div>
+              <div class="tile"><span>Disk</span><b id="tile-disk">–</b></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card" aria-labelledby="weather-title">
+          <div class="card-head">
+            <svg class="icon"><use href="#i-cloud"/></svg>
+            <h2 id="weather-title">Weather</h2>
+            <button class="mini-btn" type="button" data-refresh="weather" title="Refresh" aria-label="Refresh weather">
+              <svg class="icon"><use href="#i-refresh"/></svg>
+            </button>
+          </div>
+          <div class="card-body">
+            <div class="weather-main">
+              <div>
+                <div class="temp mono" id="w-temp">--°</div>
+                <div class="w-city" id="w-city">&nbsp;</div>
+                <div class="w-desc" id="w-desc">Loading…</div>
+              </div>
+              <svg class="weather-icon" id="w-icon"><use href="#w-cloudy"/></svg>
+            </div>
+            <div class="tiles">
+              <div class="tile"><span>Humidity</span><b id="w-humidity">–</b></div>
+              <div class="tile"><span>Wind</span><b id="w-wind">–</b></div>
+              <div class="tile"><span>Feels Like</span><b id="w-feels">–</b></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card" aria-labelledby="music-title">
+          <div class="card-head">
+            <svg class="icon"><use href="#i-music"/></svg>
+            <h2 id="music-title">Now Playing</h2>
+            <span class="head-note" id="music-device"></span>
+          </div>
+          <div class="card-body">
+            <div class="track">
+              <div class="art" id="music-art"><svg class="icon"><use href="#i-music"/></svg></div>
+              <div class="track-text">
+                <a class="track-title" id="music-title-text" target="_blank" rel="noopener noreferrer">Nothing playing</a>
+                <div class="track-artist" id="music-artist">&nbsp;</div>
+              </div>
+            </div>
+            <div class="bar thin"><i id="music-bar"></i></div>
+            <div class="track-times mono"><span id="music-pos">0:00</span><span id="music-len">0:00</span></div>
+            <div class="music-controls">
+              <button class="round-btn" type="button" data-spotify="previous" title="Previous" aria-label="Previous song"><svg class="icon"><use href="#i-prev"/></svg></button>
+              <button class="round-btn big" type="button" data-spotify="toggle" id="music-toggle" title="Play or pause" aria-label="Play or pause"><svg class="icon"><use href="#i-play"/></svg></button>
+              <button class="round-btn" type="button" data-spotify="next" title="Next" aria-label="Next song"><svg class="icon"><use href="#i-next"/></svg></button>
+            </div>
+            <p class="card-note" id="music-note" hidden></p>
+          </div>
+        </section>
+
+        <section class="card" aria-labelledby="uptime-title">
+          <div class="card-head">
+            <svg class="icon"><use href="#i-pulse"/></svg>
+            <h2 id="uptime-title">System Uptime</h2>
+            <span class="head-note mono" id="uptime-small">00:00:00</span>
+          </div>
+          <div class="card-body">
+            <div class="uptime-row"><span>Jarvis running for</span><b class="mono" id="uptime-big">00:00:00</b></div>
+            <div class="tiles two">
+              <div class="tile"><span>Conversations</span><b id="count-conversations">0</b></div>
+              <div class="tile"><span>Commands</span><b id="count-commands">0</b></div>
+            </div>
+            <div class="meter load">
+              <div class="meter-row"><span>System Load</span></div>
+              <div class="bar"><i id="load-bar"></i></div>
+              <div class="meter-row after"><span class="load-label" id="load-label">–</span><span class="mono" id="load-text">–</span></div>
+            </div>
+          </div>
+        </section>
+      </aside>
+
+      <section class="stage" aria-label="Jarvis status">
+        <div class="orb" id="orb" data-state="offline">
+          <div class="orb-glow"></div>
+          <svg viewBox="0 0 320 320" aria-hidden="true">
+            <circle class="ring ring-outer" cx="160" cy="160" r="157"/>
+            <circle class="ring ring-ticks" cx="160" cy="160" r="140"/>
+            <circle class="ring ring-arc" cx="160" cy="160" r="124"/>
+            <circle class="ring ring-mid" cx="160" cy="160" r="112"/>
+          </svg>
+          <div class="orb-core"><div class="bars"><span></span><span></span><span></span><span></span><span></span></div></div>
+        </div>
+
+        <h1 class="stage-title">J.A.R.V.I.S</h1>
+        <div class="status" id="status" data-state="offline" role="status">
+          <i class="dot"></i><span id="status-text">Connecting to Jarvis…</span>
+        </div>
+        <p class="caption" id="caption" aria-live="polite"></p>
+
+        <div class="controls">
+          <button class="ctrl" type="button" id="mic-btn" aria-pressed="false" title="Mute microphone" aria-label="Mute microphone">
+            <svg class="icon"><use href="#i-mic-off"/></svg>
+          </button>
+          <button class="ctrl ctrl-main" type="button" id="talk-btn" title="Wake Jarvis" aria-label="Wake Jarvis">
+            <svg class="icon"><use href="#i-mic"/></svg>
+          </button>
+          <button class="ctrl" type="button" id="keys-btn" title="Type a message ( / )" aria-label="Type a message">
+            <svg class="icon"><use href="#i-keyboard"/></svg>
+          </button>
+        </div>
+      </section>
+
+      <section class="card chat" aria-labelledby="chat-title">
+        <div class="chat-head">
+          <h2 id="chat-title">Conversation</h2>
+          <div class="chat-actions">
+            <button class="pill-btn" type="button" id="clear-btn" title="Clear the conversation">
+              <svg class="icon"><use href="#i-trash"/></svg><span id="clear-label">Clear</span>
+            </button>
+            <button class="pill-btn" type="button" id="export-btn" title="Save the conversation as a Markdown file">
+              <svg class="icon"><use href="#i-download"/></svg><span>Export</span>
+            </button>
+          </div>
+        </div>
+        <div class="chat-log" id="chat-log" role="log" aria-live="polite"></div>
+        <form class="chat-input" id="chat-form" autocomplete="off">
+          <input id="chat-text" type="text" placeholder="Type a message…" aria-label="Message Jarvis" maxlength="4000" disabled>
+          <button class="send-btn" type="submit" aria-label="Send" disabled id="send-btn">
+            <svg class="icon"><use href="#i-send"/></svg>
+          </button>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="settings-dialog" aria-labelledby="settings-title">
+    <form method="dialog" class="dialog-head">
+      <h2 id="settings-title">Settings</h2>
+      <button class="icon-btn small" value="close" aria-label="Close settings"><svg class="icon"><use href="#i-close"/></svg></button>
+    </form>
+    <div class="dialog-body">
+      <h3>Voice</h3>
+      <label class="setting">
+        <span><b>Listen for “Hey Jarvis”</b><small id="mic-hint">Turn off to stop using the microphone.</small></span>
+        <span class="switch"><input type="checkbox" id="set-mic"></span>
+      </label>
+      <label class="setting">
+        <span><b>Speak replies to typed messages</b><small>Off: typing gets a text reply, talking gets a spoken one.</small></span>
+        <span class="switch"><input type="checkbox" id="set-speak-typed"></span>
+      </label>
+
+      <h3>Chat</h3>
+      <label class="setting">
+        <span><b>Show tools Jarvis used</b><small>Little tags under replies, like “Web search”.</small></span>
+        <span class="switch"><input type="checkbox" id="set-show-tools"></span>
+      </label>
+
+      <h3>Weather</h3>
+      <form class="setting city" id="city-form">
+        <span><b>City</b><small>Like “Raleigh, NC” or “London”.</small></span>
+        <span class="city-edit"><input id="set-city" type="text" maxlength="80" aria-label="Weather city"><button class="pill-btn" type="submit">Save</button></span>
+      </form>
+      <div class="setting">
+        <span><b>Units</b></span>
+        <span class="segmented" role="radiogroup" aria-label="Units">
+          <label><input type="radio" name="units" value="imperial"><span>°F · mph</span></label>
+          <label><input type="radio" name="units" value="metric"><span>°C · km/h</span></label>
+        </span>
+      </div>
+
+      <p class="dialog-foot">Shortcuts: <kbd>/</kbd> type a message · <kbd>Esc</kbd> stop speaking</p>
+    </div>
+  </dialog>
+
+  <dialog id="lightbox" aria-label="Screenshot">
+    <form method="dialog"><button class="lightbox-close icon-btn small" aria-label="Close"><svg class="icon"><use href="#i-close"/></svg></button></form>
+    <img id="lightbox-img" alt="">
+    <p id="lightbox-label"></p>
+  </dialog>
+
+  <script src="/ui/app.js"></script>
+</body>
+</html>

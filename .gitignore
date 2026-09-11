@@ -1,6 +1,7 @@
 # Secrets and personal files
 .env
 memory.json
+settings.json
 CLAUDE.md
 
 # Python

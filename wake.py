@@ -10,8 +10,10 @@ THRESHOLD = 0.5       # 0-1 confidence; raise if it triggers too easily
 
 _model = None         # loaded the first time, then reused, so dozing off doesn't reload it every time
 
-def wait_for_wake_word():
-    """Block until the user says 'Hey Jarvis'. Runs fully locally & free."""
+def wait_for_wake_word(should_stop=None, on_level=None) -> bool:
+    """Block until the user says 'Hey Jarvis'. Runs fully locally & free.
+    Returns True when it heard the wake word, or False if should_stop() asked it to give up
+    (the GUI's buttons use that). on_level gets the mic loudness for the GUI's orb."""
     global _model
     if _model is None:
         # "hey_jarvis" is a built-in pretrained model — perfect for us.
@@ -23,9 +25,13 @@ def wait_for_wake_word():
     with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16",
                         blocksize=CHUNK, device=6) as stream:
         while True:
+            if should_stop and should_stop():
+                return False
             audio, _ = stream.read(CHUNK)      # CHUNK = how much to read, audio = what you got
             frame = np.squeeze(audio)
+            if on_level:
+                on_level(float(np.abs(frame.astype(np.float32)).mean()) / 32768)
             prediction = _model.predict(frame)
             if prediction["hey_jarvis"] > THRESHOLD:
                 print("Woke up")
-                return
+                return True
