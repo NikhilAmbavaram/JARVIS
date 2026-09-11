@@ -1,0 +1,11 @@
+# Secrets and personal files
+.env
+memory.json
+CLAUDE.md
+
+# Python
+venv/
+__pycache__/
+
+# Audio
+*.wav

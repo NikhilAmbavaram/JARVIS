@@ -19,18 +19,64 @@ from memory import remember
 
 load_dotenv(Path(__file__).with_name(".env"))  # so SPOTIFY_CLIENT_ID is there even when tools.py runs on its own
 
-# SAFETY: Jarvis may only touch things inside these folders. Edit to taste.
-ALLOWED_ROOTS = [
-    Path.home() / "code",               # e.g. C:\Users\you\code
-    Path.home() / "Documents" / "cs",
-]
+
+# ---------- Permission: git and read_file work in any folder, but Jarvis asks first ----------
+# The first time a folder is used, the tool doesn't run. It tells Claude to ask the user instead.
+# A call with confirmed=true only counts after the user has actually replied (a new turn), so Claude
+# can't ask and answer its own question in one go. A yes covers that repo or folder, and everything
+# inside it, until Jarvis restarts.
+
+_approved = set()    # folders the user said yes to (Windows paths compare case-insensitively)
+_asked = {}          # folder -> the turn Jarvis asked about it
+_turn = 0            # how many times the user has spoken (brain.py calls new_turn)
+CONFIRM_WINDOW = 2   # the yes has to come within this many replies of the question
+
+# Never read or commit these, even with permission: they hold passwords and API keys
+SECRET_NAMES = {".env", ".git-credentials", ".netrc", "_netrc", "id_rsa", "id_ecdsa", "id_ed25519"}
+SECRET_SUFFIXES = (".pem", ".key", ".pfx", ".p12")
+NOT_SECRET = {".env.example", ".env.sample", ".env.template"}   # placeholder files meant to be shared
 
 
-def _is_allowed(path: Path) -> bool:
-    """True only if path is inside one of ALLOWED_ROOTS. is_relative_to compares whole
-    folder names, so a 'code-old' folder can't sneak past a 'code' root."""
-    path = path.resolve()
-    return any(path.is_relative_to(root.resolve()) for root in ALLOWED_ROOTS)
+def new_turn():
+    """brain.py calls this every time the user says something."""
+    global _turn
+    _turn += 1
+
+
+def _is_secret(path) -> bool:
+    """True for .env files, SSH keys and the like. Only looks at the file name."""
+    name = Path(path).name.lower()
+    if name in NOT_SECRET:
+        return False
+    return name in SECRET_NAMES or name.startswith(".env.") or name.endswith(SECRET_SUFFIXES)
+
+
+def _project_folder(path: Path) -> Path:
+    """What a yes applies to: the git repo that path is in, or else its own folder.
+    Your home folder and the drive root never count as a repo."""
+    folder = path if path.is_dir() else path.parent
+    for candidate in (folder, *folder.parents):
+        if candidate == Path.home() or candidate == Path(candidate.anchor):
+            break
+        if (candidate / ".git").exists():
+            return candidate
+    return folder
+
+
+def _permission(path: Path, confirmed: bool, tool: str):
+    """None if Jarvis may use path, otherwise a message telling Claude to ask the user first."""
+    folder = _project_folder(path)
+    if any(folder.is_relative_to(yes) for yes in _approved):
+        return None
+    asked = _asked.get(folder)
+    if confirmed and asked is not None and 0 < _turn - asked <= CONFIRM_WINDOW:
+        _approved.add(folder)
+        del _asked[folder]
+        return None
+    _asked[folder] = _turn   # (re)start the question; a confirmed=true in the same turn doesn't count
+    return (f"Permission needed. Ask the user in one short question whether you may use {folder}, "
+            f"saying the folder name the way a person would. Only if they clearly say yes, call {tool} "
+            f"again with confirmed set to true. A yes covers that whole folder until Jarvis restarts.")
 
 
 def _run(cmd, cwd=None):
@@ -41,41 +87,69 @@ def _run(cmd, cwd=None):
 
 # ---------- Git ----------
 
-def git_status(repo: str) -> str:
-    path = Path(repo).expanduser()
-    if not _is_allowed(path):
-        return f"Refused: {repo} is outside my allowed folders."
-    return _run(["git", "status", "-s", "-b"], cwd=path)
+def _repo(repo: str, confirmed: bool, tool: str):
+    """Rough name or exact path -> (repo folder, None), or (None, a message for Claude)."""
+    path, message = _find(repo, "folder")   # _find is in the files & folders section below
+    if message:
+        return None, message
+    message = _permission(path, confirmed, tool)
+    if message:
+        return None, message
+    return _project_folder(path), None
 
 
-def git_commit_all(repo: str, message: str) -> str:
-    path = Path(repo).expanduser()
-    if not _is_allowed(path):
-        return f"Refused: {repo} is outside my allowed folders."
-    _run(["git", "add", "-A"], cwd=path)
-    return _run(["git", "commit", "-m", message], cwd=path)
+def git_status(repo: str, confirmed: bool = False) -> str:
+    folder, message = _repo(repo, confirmed, "git_status")
+    if message:
+        return message
+    return _run(["git", "status", "-s", "-b"], cwd=folder)
 
 
-def git_push(repo: str) -> str:
-    path = Path(repo).expanduser()
-    if not _is_allowed(path):
-        return f"Refused: {repo} is outside my allowed folders."
-    return _run(["git", "push"], cwd=path)
+def git_commit_all(repo: str, message: str, confirmed: bool = False) -> str:
+    folder, problem = _repo(repo, confirmed, "git_commit_all")
+    if problem:
+        return problem
+    _run(["git", "add", "-A"], cwd=folder)
+    # Take secrets back out of the commit, in case this repo's .gitignore forgot them
+    staged = subprocess.run(["git", "diff", "--cached", "--name-only", "-z"], cwd=folder, capture_output=True,
+                            text=True, encoding="utf-8", errors="replace", timeout=60).stdout.split("\0")
+    secrets = [name for name in staged if name and _is_secret(name)]
+    if secrets:
+        _run(["git", "--literal-pathspecs", "reset", "-q", "--", *secrets], cwd=folder)
+    result = _run(["git", "commit", "-m", message], cwd=folder)
+    if secrets:
+        result += ("\nKept out of the commit because they hold secrets: " + ", ".join(secrets)
+                   + ". Adding them to the repo's .gitignore would stop them being picked up.")
+    return result
 
 
-def git_pull(repo: str) -> str:
-    path = Path(repo).expanduser()
-    if not _is_allowed(path):
-        return f"Refused: {repo} is outside my allowed folders."
-    return _run(["git", "pull"], cwd=path)
+def git_push(repo: str, confirmed: bool = False) -> str:
+    folder, message = _repo(repo, confirmed, "git_push")
+    if message:
+        return message
+    return _run(["git", "push"], cwd=folder)
+
+
+def git_pull(repo: str, confirmed: bool = False) -> str:
+    folder, message = _repo(repo, confirmed, "git_pull")
+    if message:
+        return message
+    return _run(["git", "pull"], cwd=folder)
 
 
 # ---------- Files ----------
 
-def read_file(filepath: str) -> str:
-    path = Path(filepath).expanduser()
-    if not _is_allowed(path):
-        return f"Refused: {filepath} is outside my allowed folders."
+def read_file(filepath: str, confirmed: bool = False) -> str:
+    path, message = _find(filepath, "file")
+    if message:
+        return message
+    if path.is_dir():
+        return f"{path} is a folder, not a file. Use list_files to see what's inside."
+    if _is_secret(path):
+        return f"Refused: {path.name} holds secrets like passwords or API keys, so I never read it."
+    message = _permission(path, confirmed, "read_file")
+    if message:
+        return message
     text = path.read_text(encoding="utf-8", errors="replace")
     return text[:4000]  # keep it short enough to speak/reason about
 
@@ -189,9 +263,10 @@ def open_app(name: str) -> str:
 
 # --- Files & folders ---
 
-# Where Jarvis looks for things to open. Only names ever go to Claude, never file contents,
-# so this can be wider than ALLOWED_ROOTS (which read_file and the git tools use).
-OPEN_ROOTS = ALLOWED_ROOTS + [
+# Where Jarvis looks for things to open and list, and where rough names are searched. Only names
+# ever go to Claude from here, so no permission is needed. (Git and read_file can reach any folder,
+# by exact path, but ask first.)
+OPEN_ROOTS = [
     Path.home() / "Desktop",
     Path.home() / "Documents",
     Path.home() / "Downloads",
@@ -635,43 +710,54 @@ def spotify_control(action: str) -> str:
 # ---------- The schema Claude reads ----------
 # This tells Claude what tools exist, what they do, and their inputs.
 
+# Shared by the git tools and read_file
+ASK_FIRST = (" Works in any folder, but the first time a folder is used it replies that permission is "
+             "needed: ask the user, and only call again with confirmed true if they say yes.")
+CONFIRMED = {
+    "type": "boolean",
+    "description": "Leave out at first. Set to true only when calling again after the user said yes to this folder.",
+}
+REPO = ("The repo folder: a rough name of a folder on the Desktop or in Documents or Downloads "
+        "(e.g. 'csc216'), or an exact path like ~/PycharmProjects/pythonProject")
+
 TOOL_SCHEMA = [
     {
         "name": "git_status",
-        "description": "Show the git status (branch + changed files) of a repo.",
+        "description": "Show the git status (branch + changed files) of a repo." + ASK_FIRST,
         "input_schema": {
             "type": "object",
-            "properties": {"repo": {"type": "string", "description": "Path to the repo folder"}},
+            "properties": {"repo": {"type": "string", "description": REPO}, "confirmed": CONFIRMED},
             "required": ["repo"],
         },
     },
     {
         "name": "git_commit_all",
-        "description": "Stage all changes and commit them with a message.",
+        "description": "Stage all changes and commit them with a message. Never commits .env or key files." + ASK_FIRST,
         "input_schema": {
             "type": "object",
             "properties": {
-                "repo": {"type": "string"},
+                "repo": {"type": "string", "description": REPO},
                 "message": {"type": "string", "description": "Commit message"},
+                "confirmed": CONFIRMED,
             },
             "required": ["repo", "message"],
         },
     },
     {
         "name": "git_push",
-        "description": "Push committed changes to the remote.",
+        "description": "Push committed changes to the remote." + ASK_FIRST,
         "input_schema": {
             "type": "object",
-            "properties": {"repo": {"type": "string"}},
+            "properties": {"repo": {"type": "string", "description": REPO}, "confirmed": CONFIRMED},
             "required": ["repo"],
         },
     },
     {
         "name": "git_pull",
-        "description": "Pull latest changes from the remote.",
+        "description": "Pull latest changes from the remote." + ASK_FIRST,
         "input_schema": {
             "type": "object",
-            "properties": {"repo": {"type": "string"}},
+            "properties": {"repo": {"type": "string", "description": REPO}, "confirmed": CONFIRMED},
             "required": ["repo"],
         },
     },
@@ -691,10 +777,17 @@ TOOL_SCHEMA = [
     },
     {
         "name": "read_file",
-        "description": "Read the contents of a text/code file (first 4000 chars).",
+        "description": "Read the contents of a text/code file (first 4000 chars). Never opens .env or key files." + ASK_FIRST,
         "input_schema": {
             "type": "object",
-            "properties": {"filepath": {"type": "string"}},
+            "properties": {
+                "filepath": {
+                    "type": "string",
+                    "description": "Exact path (e.g. ~/PycharmProjects/pythonProject/main.py), or a rough file name "
+                                   "from the Desktop, Documents or Downloads",
+                },
+                "confirmed": CONFIRMED,
+            },
             "required": ["filepath"],
         },
     },

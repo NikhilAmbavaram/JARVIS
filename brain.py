@@ -29,6 +29,7 @@ class Brain:
 
     def think(self, user_text: str) -> str:
         """Send the user's text to Claude, run any tools it asks for, return the spoken reply."""
+        tools.new_turn()  # lets folder permission tell the user's real "yes" apart from Claude answering itself
         self.messages.append({"role": "user", "content": user_text})
         self._trim_history()
 
