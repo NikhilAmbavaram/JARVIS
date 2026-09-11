@@ -22,7 +22,7 @@ def listen() -> str:
     silent_for = 0.0
     block = int(SAMPLE_RATE * 0.1)  # process audio in 0.1s pieces
 
-    with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32") as stream:
+    with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32", device=6) as stream:
         recorded = 0.0
         # Wait until the person actually starts talking (up to 8s), so leading
         # silence doesn't instantly end the recording.
@@ -54,7 +54,8 @@ def listen() -> str:
     # Speech -> text
     result = oai.audio.transcriptions.create(
         model="gpt-4o-mini-transcribe",   # cheap + good; "gpt-4o-transcribe" is more accurate
-        file=buf,
+        file=buf, 
+        
     )
     text = result.text.strip()
     print(f"📝 You said: {text}")
@@ -69,6 +70,8 @@ def speak(text: str):
         voice="ash",              # try: ash, onyx, ballad, sage, verse — pick a Jarvis vibe
         input=text,
         response_format="wav",
+        instructions="Talk just like Jarvis from the MCU. Refined British accent. Crisp, brisk pace. Warm, extremely friendly, upbeat tone. Talk very fast and concise.",
+        speed=1.3
     )
     # Load the returned WAV and play it through the speakers
     audio, sr = sf.read(io.BytesIO(response.content), dtype="float32")
