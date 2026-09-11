@@ -43,6 +43,10 @@ def listen() -> str:
             elif recorded > 8:   # nobody said anything
                 break
 
+    if not started:              # nobody spoke: skip the API call and report silence
+        print("📝 (heard nothing)")
+        return ""
+
     audio_data = np.concatenate(chunks, axis=0)
 
     # Put the recording into an in-memory WAV file (no temp file on disk)
@@ -53,10 +57,14 @@ def listen() -> str:
 
     # Speech -> text
     result = oai.audio.transcriptions.create(
-        model="gpt-4o-mini-transcribe",   # cheap + good; "gpt-4o-transcribe" is more accurate
-        file=buf, 
-        
-    )
+    model="gpt-transcribe",
+    file=buf,
+    prompt="Voice commands to a coding assistant named Jarvis about git, files, and CS coursework.",
+    extra_body={
+        "keywords": ["Jarvis", "git", "commit", "push", "pull", "repo", "cs101", "VS Code", "Spotify", "aight", "go offline", "stand down", "bruh", "mane", "like", "obsidian", "astra", "AI"],
+        "languages": ["en"],
+    },
+)
     text = result.text.strip()
     print(f"📝 You said: {text}")
     return text
