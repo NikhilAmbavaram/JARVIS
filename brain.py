@@ -42,7 +42,7 @@ class Brain:
         for _ in range(MAX_TOOL_ROUNDS):  # loop to allow multiple tool calls in a row
             response = self.client.messages.create(
                 model=config.BRAIN_MODEL,
-                max_tokens=1000,
+                max_tokens=2000,  # room for long notes; spoken replies stay short anyway
                 system=system_prompt,
                 messages=self.messages,
                 tools=tools.TOOL_SCHEMA,
@@ -59,6 +59,14 @@ class Brain:
 
             if response.stop_reason == "pause_turn":
                 continue  # a long search paused mid-turn: send it back so Claude can finish
+
+            if response.stop_reason == "max_tokens" and any(b.type == "tool_use" for b in response.content):
+                # Cut off in the middle of a tool call (say, a very long note). A half-written tool
+                # request can't stay in the history, or every later call gets rejected.
+                self.messages.pop()
+                reply = "That was too long to finish in one go, sir. Shall I try a shorter version?"
+                self.messages.append({"role": "assistant", "content": reply})
+                return reply
 
             if response.stop_reason != "tool_use":
                 # Speak only what Claude said after its last web result, so a
@@ -82,6 +90,7 @@ class Brain:
                         output = func(**block.input) if func else f"Unknown tool: {block.name}"
                     except Exception as e:
                         output = f"Error: {e}"
+                    print(f"   ↳ {str(output)[:150]}")
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
