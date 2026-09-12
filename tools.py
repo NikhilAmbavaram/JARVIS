@@ -1,10 +1,15 @@
-# tools.py — the things Jarvis can DO (Phase 4 tools + the Phase 5 remember tool)
+# tools.py — the things Jarvis can DO: git, files, code, apps, notes, Spotify, visuals, screenshots, memory
 
 import base64
+import difflib
+import fnmatch
 import io
 import os
+import shutil
+import signal
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 import functools
 import json
@@ -18,19 +23,25 @@ import spotipy
 from spotipy.cache_handler import CacheFileHandler
 from spotipy.oauth2 import SpotifyPKCE
 
-from memory import remember
+from memory import forget, remember
 
 load_dotenv(Path(__file__).with_name(".env"))  # so SPOTIFY_CLIENT_ID is there even when tools.py runs on its own
 
 
-# ---------- Permission: git and read_file work in any folder, but Jarvis asks first ----------
-# The first time a folder is used, the tool doesn't run. It tells Claude to ask the user instead.
-# A call with confirmed=true only counts after the user has actually replied (a new turn), so Claude
-# can't ask and answer its own question in one go. A yes covers that repo or folder, and everything
-# inside it, until Jarvis restarts.
+# ---------- Permission: files, git and code work in any folder, but Jarvis asks first ----------
+# In the dashboard, APPROVER shows an approval card (and listens for a spoken yes or no). "Allow for this chat"
+# covers that folder, or all commands, for the rest of the chat.
+# In the terminal version there's no card: the tool tells Claude to ask, and a call with confirmed=true only
+# counts after the user has actually replied (a new turn), so Claude can't ask and answer its own question.
+# Either way a yes covers that repo or folder, and everything inside it, until Jarvis restarts.
 
-_approved = set()    # folders the user said yes to (Windows paths compare case-insensitively)
-_asked = {}          # folder -> the turn Jarvis asked about it
+APPROVER = None      # gui.py sets this: APPROVER(kind, title, detail, chat_id) -> "once", "chat" or "deny"
+CURRENT_CHAT = None  # the chat the current reply belongs to (brain.py sets it through begin_reply)
+WORKSPACE = Path(__file__).with_name("workspace")   # Jarvis's own folder for scripts, backups and new files
+
+_approved = {}       # chat id (None in the terminal version) -> folders the user said yes to
+_commands_ok = set() # chats where the user allowed every command
+_asked = {}          # folder -> the turn Jarvis asked about it (terminal version)
 _turn = 0            # how many times the user has spoken (brain.py calls new_turn)
 CONFIRM_WINDOW = 2   # the yes has to come within this many replies of the question
 
@@ -66,14 +77,34 @@ def _project_folder(path: Path) -> Path:
     return folder
 
 
+def begin_reply(chat_id):
+    """brain.py calls this at the start of every reply: which chat it's for, and fresh lists for the chat window."""
+    global CURRENT_CHAT, quiet_reply
+    CURRENT_CHAT = chat_id
+    quiet_reply = None
+    for pending in (links_to_show, screenshots_to_show, visuals_to_show, files_to_show):
+        pending.clear()
+
+
 def _permission(path: Path, confirmed: bool, tool: str):
-    """None if Jarvis may use path, otherwise a message telling Claude to ask the user first."""
+    """None if Jarvis may use path, otherwise a message for Claude (ask first, or the user said no)."""
     folder = _project_folder(path)
-    if any(folder.is_relative_to(yes) for yes in _approved):
+    if folder.is_relative_to(WORKSPACE.resolve()):
+        return None   # Jarvis's own workspace never needs asking
+    approved = _approved.setdefault(CURRENT_CHAT, set())
+    if any(folder.is_relative_to(yes) for yes in approved):
+        return None
+    if APPROVER is not None:
+        decision = APPROVER("folder", f"Let Jarvis read and change files in {folder}?",
+                            f"Asked by {tool}. This covers everything inside that folder for the rest of this chat.",
+                            CURRENT_CHAT)
+        if decision == "deny":
+            return f"The user said no to using {folder}. Don't look for a way around it; ask what they'd like instead."
+        approved.add(folder)
         return None
     asked = _asked.get(folder)
     if confirmed and asked is not None and 0 < _turn - asked <= CONFIRM_WINDOW:
-        _approved.add(folder)
+        approved.add(folder)
         del _asked[folder]
         return None
     _asked[folder] = _turn   # (re)start the question; a confirmed=true in the same turn doesn't count
@@ -142,19 +173,364 @@ def git_pull(repo: str, confirmed: bool = False) -> str:
 
 # ---------- Files ----------
 
-def read_file(filepath: str, confirmed: bool = False) -> str:
-    path, message = _find(filepath, "file")
+READ_CHARS = 40_000   # most text one read_file call hands to Claude; start_line reads further
+PDF_LIMIT = 30_000_000
+PICTURE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
+
+
+def _existing_file(text: str):
+    """Exact path, a path inside the workspace, or a rough name -> (path, None) or (None, message)."""
+    raw = Path(text).expanduser()
+    if not raw.is_absolute() and (WORKSPACE / raw).exists():
+        return (WORKSPACE / raw).resolve(), None
+    return _find(text, "file")
+
+
+def read_file(filepath: str, confirmed: bool = False, start_line: int = 1, max_lines: int = 0):
+    path, message = _existing_file(filepath)
     if message:
         return message
     if path.is_dir():
-        return f"{path} is a folder, not a file. Use list_files to see what's inside."
+        return f"{path} is a folder, not a file. Use list_files or find_files to see what's inside."
     if _is_secret(path):
         return f"Refused: {path.name} holds secrets like passwords or API keys, so I never read it."
     message = _permission(path, confirmed, "read_file")
     if message:
         return message
-    text = path.read_text(encoding="utf-8", errors="replace")
-    return text[:4000]  # keep it short enough to speak/reason about
+
+    suffix = path.suffix.lower()
+    if suffix in PICTURE_TYPES:   # Claude can look at pictures
+        from PIL import Image
+        with Image.open(path) as picture:
+            picture.load()
+            return _for_claude(picture, path.name, add_thumbnail=False)
+    if suffix == ".pdf":
+        data = path.read_bytes()
+        if len(data) > PDF_LIMIT:
+            return f"{path.name} is too big to read ({len(data) // 1_000_000} MB; the limit is 30 MB)."
+        return [{"type": "text", "text": f"{path} ({len(data) // 1024} KB PDF)"},
+                {"type": "document", "title": path.name,
+                 "source": {"type": "base64", "media_type": "application/pdf", "data": base64.b64encode(data).decode("ascii")}}]
+
+    raw = path.read_bytes()
+    if b"\x00" in raw[:8000]:
+        return f"{path.name} is a binary file, so I can't read it as text."
+    lines = raw.decode("utf-8", errors="replace").splitlines()
+    start = max(1, int(start_line or 1))
+    chunk = lines[start - 1:start - 1 + max_lines] if max_lines else lines[start - 1:]
+    shown, used = [], 0
+    for number, line in enumerate(chunk, start):
+        entry = f"{number}\t{line}"
+        if shown and used + len(entry) > READ_CHARS:
+            break
+        shown.append(entry)
+        used += len(entry) + 1
+    end = start + len(shown) - 1
+    more = f" (more below: call again with start_line={end + 1})" if end < len(lines) else ""
+    return f"{path}: lines {start}-{end} of {len(lines)}{more}. Line numbers are not part of the file.\n" + "\n".join(shown)
+
+
+# ---------- Coding: commands, scripts and file edits ----------
+# Commands and scripts always ask first (the dashboard shows the exact command). File changes use the
+# folder permission above, back up the old version into the workspace, and show a diff in the chat.
+
+MAX_OUTPUT = 12_000      # characters of command output handed back to Claude
+MAX_WRITE = 2_000_000
+SKIP_DIRS = {".git", "venv", ".venv", "node_modules", "__pycache__"}
+_running = None          # the process a command or script is waiting on, so Stop can end it
+_stopped_by_user = False
+
+
+def _work_folder(folder: str):
+    """Where a command runs -> (folder, None) or (None, message). Empty means the workspace."""
+    if not (folder or "").strip():
+        WORKSPACE.mkdir(exist_ok=True)
+        return WORKSPACE.resolve(), None
+    path, message = _find(folder, "folder")
+    if message:
+        return None, message
+    return (path if path.is_dir() else path.parent), None
+
+
+def _approve_run(title: str, detail: str):
+    """None if Jarvis may run it, otherwise a message for Claude."""
+    if APPROVER is None:
+        return "Running commands and scripts only works in the dashboard (python gui.py), where the user can approve them."
+    if CURRENT_CHAT in _commands_ok:
+        return None
+    decision = APPROVER("command", title, detail, CURRENT_CHAT)
+    if decision == "deny":
+        return "The user denied this. Don't run it another way; ask what they'd like instead."
+    if decision == "chat":
+        _commands_ok.add(CURRENT_CHAT)
+    return None
+
+
+def _kill_tree(process):
+    """End a process and everything it started (a script's own child processes too)."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)], capture_output=True,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        pass
+
+
+def stop_running():
+    """gui.py's Stop button: end whatever command or script is running."""
+    global _stopped_by_user
+    process = _running
+    if process is not None and process.poll() is None:
+        _stopped_by_user = True
+        _kill_tree(process)
+
+
+def _run_process(args: list, cwd: Path, timeout, env=None) -> str:
+    global _running, _stopped_by_user
+    timeout = max(5, min(int(timeout or 120), 900))
+    started = time.monotonic()
+    flags = (subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW) if os.name == "nt" else 0
+    try:
+        process = subprocess.Popen(args, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, env=env, creationflags=flags,
+                                   start_new_session=os.name != "nt")
+    except OSError as e:
+        return f"Couldn't start it: {e}"
+    _running, _stopped_by_user = process, False
+    ending = ""
+    try:
+        output, _ = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(process)
+        output, _ = process.communicate()
+        ending = f" (stopped: it hit the {timeout} s time limit)"
+    finally:
+        _running = None
+    if _stopped_by_user:
+        ending = " (stopped by the user)"
+    text = output.decode("utf-8", errors="replace").replace("\r\n", "\n").strip()
+    if len(text) > MAX_OUTPUT:
+        text = text[:MAX_OUTPUT // 2] + f"\n… ({len(text) - MAX_OUTPUT} characters cut) …\n" + text[-MAX_OUTPUT // 2:]
+    return f"Exit code {process.returncode}{ending}, took {time.monotonic() - started:.1f} s.\n{text or '(no output)'}"
+
+
+def run_command(command: str, folder: str = "", timeout: int = 120) -> str:
+    """Run a PowerShell command on the user's PC, after they approve it, and return the output."""
+    command = (command or "").strip()
+    if not command:
+        return "No command given."
+    cwd, message = _work_folder(folder)
+    if message:
+        return message
+    shell = "PowerShell" if os.name == "nt" else "bash"
+    blocked = _approve_run(f"Run this {shell} command in {cwd}?", command)
+    if blocked:
+        return blocked
+    if os.name == "nt":
+        args = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+                "$ProgressPreference = 'SilentlyContinue'; [Console]::OutputEncoding = [Text.Encoding]::UTF8; " + command]
+    else:
+        args = ["bash", "-lc", command]
+    return _run_process(args, cwd, timeout)
+
+
+def _pictures_in(folder: Path) -> dict:
+    try:
+        return {p: p.stat().st_mtime for p in folder.iterdir() if p.suffix.lower() in (*PICTURE_TYPES, ".svg")}
+    except OSError:
+        return {}
+
+
+def run_python(code: str, folder: str = "", timeout: int = 120) -> str:
+    """Run a Python script with Jarvis's own Python, after the user approves it."""
+    if not (code or "").strip():
+        return "No code given."
+    cwd, message = _work_folder(folder)
+    if message:
+        return message
+    blocked = _approve_run(f"Run this Python script in {cwd}?", code)
+    if blocked:
+        return blocked
+    scripts = WORKSPACE / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    script = scripts / f"script_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}.py"
+    script.write_text(code, encoding="utf-8")
+    before = _pictures_in(cwd)
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1", "MPLBACKEND": "Agg"}  # Agg: charts save, no pop-ups
+    result = _run_process([sys.executable, str(script)], cwd, timeout, env)
+    new_pictures = [p for p, modified in _pictures_in(cwd).items() if before.get(p) != modified][:6]
+    for picture in new_pictures:
+        _file_card(picture, "created")
+    if new_pictures:
+        result += "\nNew pictures (already shown in the chat): " + ", ".join(p.name for p in new_pictures)
+    return f"Script saved as {script}\n{result}"
+
+
+def _writable(path_text: str, confirmed: bool, tool: str):
+    """A path Jarvis may write -> (path, None) or (None, message). Relative paths go in the workspace."""
+    raw = Path((path_text or "").strip()).expanduser()
+    if not str(raw) or str(raw) == ".":
+        return None, "No file path given."
+    path = (raw if raw.is_absolute() else WORKSPACE / raw).resolve()
+    if _is_secret(path):
+        return None, f"Refused: {path.name} holds secrets, so I never write it."
+    if ".git" in path.parts:
+        return None, "Refused: I don't edit files inside a .git folder."
+    if path.is_dir():
+        return None, f"{path} is a folder, not a file."
+    message = _permission(path, confirmed, tool)
+    return (None, message) if message else (path, None)
+
+
+def _backup(path: Path) -> Path:
+    backups = WORKSPACE / "backups"
+    backups.mkdir(parents=True, exist_ok=True)
+    copy = backups / f"{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}_{path.name}"
+    shutil.copy2(path, copy)
+    return copy
+
+
+def _diff(before: str, after: str, name: str, limit: int = 150) -> str:
+    lines = list(difflib.unified_diff(before.splitlines(), after.splitlines(), f"{name} (before)", f"{name} (after)",
+                                      lineterm="", n=2))
+    if len(lines) > limit:
+        lines = lines[:limit] + [f"… {len(lines) - limit} more lines of changes"]
+    return "\n".join(lines)
+
+
+def _decode(raw: bytes):
+    """File bytes -> (text with \\n line endings, used CRLF, had a BOM), or None if it isn't UTF-8 text."""
+    if b"\x00" in raw[:8000]:
+        return None
+    bom = raw.startswith(b"\xef\xbb\xbf")
+    try:
+        text = raw.decode("utf-8-sig" if bom else "utf-8")
+    except UnicodeDecodeError:
+        return None
+    return text.replace("\r\n", "\n"), b"\r\n" in raw, bom
+
+
+def _encode(text: str, crlf: bool, bom: bool) -> bytes:
+    data = (text.replace("\n", "\r\n") if crlf else text).encode("utf-8")
+    return b"\xef\xbb\xbf" + data if bom else data
+
+
+def write_file(path: str, content: str, confirmed: bool = False) -> str:
+    """Create a file, or replace a whole file, with content."""
+    target, message = _writable(path, confirmed, "write_file")
+    if message:
+        return message
+    content = (content or "").replace("\r\n", "\n")
+    if len(content) > MAX_WRITE:
+        return "That's too big to write in one go (2 MB limit)."
+    existed = target.exists()
+    before, crlf, bom = ("", False, False)
+    if existed:
+        decoded = _decode(target.read_bytes())
+        before, crlf, bom = decoded if decoded else ("", False, False)
+    backup = _backup(target) if existed else None
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(_encode(content, crlf, bom))   # keeps a Windows file's line endings
+    lines = len(content.splitlines())
+    _file_card(target, "updated" if existed else "created", diff=_diff(before, content, target.name) if existed else None)
+    if existed:
+        return f"Replaced {target} ({lines} lines). The old version is backed up at {backup}."
+    return f"Created {target} ({lines} lines)."
+
+
+def edit_file(path: str, old_text: str, new_text: str, replace_all: bool = False, confirmed: bool = False) -> str:
+    """Replace exact text in an existing file."""
+    target, message = _writable(path, confirmed, "edit_file")
+    if message:
+        return message
+    if not target.is_file():
+        return f"There's no file at {target}. Use write_file to create it."
+    decoded = _decode(target.read_bytes())
+    if decoded is None:
+        return f"{target.name} isn't a UTF-8 text file, so I won't edit it."
+    text, crlf, bom = decoded
+    old, new = (old_text or "").replace("\r\n", "\n"), (new_text or "").replace("\r\n", "\n")
+    if not old:
+        return "old_text can't be empty. To add to a file, include the lines around where the new text goes."
+    count = text.count(old)
+    if count == 0:
+        return "old_text wasn't found. Read the file again and copy the exact text, spaces and indentation included."
+    if count > 1 and not replace_all:
+        return f"old_text appears {count} times. Include more surrounding lines so it's unique, or set replace_all."
+    updated = text.replace(old, new) if replace_all else text.replace(old, new, 1)
+    first_line = text[:text.index(old)].count("\n") + 1
+    backup = _backup(target)
+    target.write_bytes(_encode(updated, crlf, bom))
+    _file_card(target, "edited", diff=_diff(text, updated, target.name))
+    return (f"Edited {target}: replaced {count if replace_all else 1} occurrence{'s' if replace_all and count > 1 else ''}, "
+            f"starting at line {first_line}. Backup: {backup}.")
+
+
+def _walk(base: Path, max_files: int = 20_000):
+    """Files under base, skipping .git, venv and friends."""
+    seen = 0
+    for root, dirs, files in os.walk(base):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for name in files:
+            seen += 1
+            if seen > max_files:
+                return
+            yield Path(root) / name
+
+
+def find_files(pattern: str, folder: str = "", confirmed: bool = False) -> str:
+    base, message = _work_folder(folder)
+    if message:
+        return message
+    message = _permission(base, confirmed, "find_files")
+    if message:
+        return message
+    pattern = (pattern or "*").strip().replace("\\", "/")
+    matches = []
+    for path in _walk(base):
+        relative = path.relative_to(base).as_posix()
+        if fnmatch.fnmatch(path.name.lower(), pattern.lower()) or fnmatch.fnmatch(relative.lower(), pattern.lower()):
+            matches.append(relative)
+            if len(matches) >= 300:
+                break
+    if not matches:
+        return f"No files matching '{pattern}' in {base}."
+    return f"{len(matches)} file(s) matching '{pattern}' in {base}:\n" + "\n".join(matches)
+
+
+def search_text(query: str, folder: str = "", file_pattern: str = "*", confirmed: bool = False) -> str:
+    base, message = _work_folder(folder)
+    if message:
+        return message
+    message = _permission(base, confirmed, "search_text")
+    if message:
+        return message
+    try:
+        finder = re.compile(query, re.IGNORECASE)
+    except re.error:
+        finder = re.compile(re.escape(query), re.IGNORECASE)
+    results = []
+    for path in _walk(base, max_files=8000):
+        if not fnmatch.fnmatch(path.name.lower(), (file_pattern or "*").lower()) or _is_secret(path):
+            continue
+        try:
+            if path.stat().st_size > 2_000_000:
+                continue
+            raw = path.read_bytes()
+        except OSError:
+            continue
+        if b"\x00" in raw[:4096]:
+            continue
+        for number, line in enumerate(raw.decode("utf-8", errors="replace").splitlines(), 1):
+            if finder.search(line):
+                results.append(f"{path.relative_to(base).as_posix()}:{number}: {line.strip()[:200]}")
+                if len(results) >= 150:
+                    return f"First 150 matches for '{query}' in {base}:\n" + "\n".join(results)
+    if not results:
+        return f"No matches for '{query}' in {base}."
+    return f"{len(results)} match(es) for '{query}' in {base}:\n" + "\n".join(results)
 
 
 # ---------- Apps, files & folders (rough names are fine) ----------
@@ -745,8 +1121,15 @@ def spotify_now_playing() -> dict:
 
 CHAT_WINDOW = False
 GUI_TITLE = "J.A.R.V.I.S"   # the dashboard's own window, never picked for a screenshot
+CHAT_SEARCH = None          # gui.py sets this to the chat store's search, for search_chats
+quiet_reply = None          # set by answer_in_chat: the one line to say while the written answer stays on screen
 links_to_show = []          # {"title": ..., "url": ...}
 screenshots_to_show = []    # {"label": ..., "image": "data:image/jpeg;base64,..."}, small copies
+visuals_to_show = []        # {"id", "kind": mermaid|chart|svg|html, "title", "content"}
+files_to_show = []          # {"path", "name", "folder", "action", "size", "image" or "preview", "diff"}
+VISUAL_KINDS = ("mermaid", "chart", "svg", "html")
+PREVIEW_TYPES = {".py", ".c", ".h", ".cpp", ".java", ".js", ".ts", ".html", ".css", ".json", ".md", ".txt", ".csv",
+                 ".xml", ".yml", ".yaml", ".toml", ".ini", ".sql", ".sh", ".ps1", ".bat", ".rs", ".go", ".cs", ".kt", ".m"}
 
 
 def show_links(links: list) -> str:
@@ -761,6 +1144,101 @@ def show_links(links: list) -> str:
     links_to_show.extend(good)
     where = "the chat window" if CHAT_WINDOW else "the terminal"
     return f"Put {len(good)} link{'s' if len(good) > 1 else ''} in {where}. Don't read the address out; just say where it is."
+
+
+def answer_in_chat(say: str = "") -> str:
+    """Keep this reply on screen and read only one short line out loud."""
+    global quiet_reply
+    if not CHAT_WINDOW:
+        return "There's no chat window in the terminal version, so everything is spoken. Keep the answer short instead."
+    quiet_reply = " ".join(str(say or "It's in the chat, sir.").split())[:200]
+    return (f'Your written answer will be shown in the chat and not read aloud. Out loud you will say only: '
+            f'"{quiet_reply}". Now write the full answer in Markdown, as long and as detailed as it needs to be.')
+
+
+def create_visual(kind: str, title: str, content: str) -> str:
+    """Show a diagram, chart, drawing or small interactive page in the chat window."""
+    kind = (kind or "").strip().lower()
+    if kind not in VISUAL_KINDS:
+        return "kind must be one of: mermaid, chart, svg, html."
+    content = (content or "").strip()
+    if not content:
+        return "The visual is empty."
+    if len(content) > 400_000:
+        return "That visual is too big (400 KB limit). Simplify it."
+    if kind == "chart":
+        try:
+            spec = json.loads(content)
+        except ValueError as e:
+            return f"chart content must be a Chart.js config in JSON: {e}"
+        if not isinstance(spec, dict) or "data" not in spec:
+            return 'The chart JSON needs at least "type" and "data".'
+    if kind == "svg" and "<svg" not in content.lower():
+        return "svg content must contain an <svg> element."
+    if not CHAT_WINDOW:
+        return "Visuals need the dashboard (python gui.py). Describe it in words instead."
+    title = (title or kind).strip()[:100]
+    visuals_to_show.append({"id": uuid.uuid4().hex[:10], "kind": kind, "title": title, "content": content})
+    return f"Showing '{title}' in the chat window."
+
+
+def _file_card(path: Path, action: str, diff: str = None):
+    """Describe a file for the chat window: a picture, a preview of the text, or just a card to open."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    card = {"path": str(path), "name": path.name, "folder": str(path.parent), "action": action, "size": size}
+    suffix = path.suffix.lower()
+    try:
+        if suffix in PICTURE_TYPES:
+            from PIL import Image
+            with Image.open(path) as picture:
+                small = _shrink(picture.convert("RGB"), 720)
+                card["image"] = "data:image/jpeg;base64," + _jpeg_base64(small, 82)
+        elif suffix == ".svg" and size < 300_000:
+            card["image"] = "data:image/svg+xml;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+        elif (suffix in PREVIEW_TYPES or not suffix) and size < 400_000:
+            decoded = _decode(path.read_bytes())
+            if decoded:
+                lines = decoded[0].splitlines()
+                card["preview"] = "\n".join(lines[:80]) + ("\n…" if len(lines) > 80 else "")
+                card["language"] = suffix.lstrip(".")
+    except Exception:
+        pass   # a card without a preview is still useful
+    if diff:
+        card["diff"] = diff
+    files_to_show.append(card)
+
+
+def show_file(path: str, confirmed: bool = False) -> str:
+    """Show a file from the user's PC in the chat window."""
+    target, message = _existing_file(path)
+    if message:
+        return message
+    if target.is_dir():
+        return f"{target} is a folder. Use list_files or find_files."
+    if _is_secret(target):
+        return f"Refused: {target.name} holds secrets, so I never show it."
+    message = _permission(target, confirmed, "show_file")
+    if message:
+        return message
+    if not CHAT_WINDOW:
+        return "Showing files needs the dashboard (python gui.py). Use open_path to open it instead."
+    _file_card(target, "shown")
+    return f"Showing {target.name} in the chat window."
+
+
+def search_chats(query: str) -> str:
+    """Search the user's past chats."""
+    if CHAT_SEARCH is None:
+        return "Searching past chats only works in the dashboard (python gui.py)."
+    hits = CHAT_SEARCH(query, limit=8, exclude_chat=CURRENT_CHAT)
+    if not hits:
+        return f"No other chats mention '{query}'."
+    lines = [f"- {time.strftime('%b %d, %Y', time.localtime(hit['time']))}, chat \"{hit['chat_title']}\", "
+             f"{'user' if hit['role'] == 'user' else 'Jarvis'}: {hit['snippet']}" for hit in hits]
+    return f"Matches for '{query}' in other chats:\n" + "\n".join(lines)
 
 
 # ---------- Screenshots (Windows) ----------
@@ -986,14 +1464,16 @@ def _jpeg_base64(image, quality: int) -> str:
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
-def _for_claude(image, label: str) -> list:
-    """The screenshot as content blocks Claude can look at, plus a small copy for the chat window."""
+def _for_claude(image, label: str, add_thumbnail: bool = True) -> list:
+    """A picture as content blocks Claude can look at, plus (for screenshots) a small copy for the chat window."""
     big = _shrink(image, SHOT_MAX_SIDE, SHOT_MAX_PIXELS)
-    small = _shrink(image, THUMB_MAX_SIDE)
-    screenshots_to_show.append({"label": label, "image": "data:image/jpeg;base64," + _jpeg_base64(small, 80)})
-    shown = " It's also shown in the user's chat window." if CHAT_WINDOW else ""
+    shown = ""
+    if add_thumbnail:
+        small = _shrink(image, THUMB_MAX_SIDE)
+        screenshots_to_show.append({"label": label, "image": "data:image/jpeg;base64," + _jpeg_base64(small, 80)})
+        shown = " It's also shown in the user's chat window." if CHAT_WINDOW else ""
     return [
-        {"type": "text", "text": f"Screenshot of {label} ({big.width}x{big.height}).{shown}"},
+        {"type": "text", "text": f"{'Screenshot of ' if add_thumbnail else 'Picture: '}{label} ({big.width}x{big.height}).{shown}"},
         {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": _jpeg_base64(big, 85)}},
     ]
 
@@ -1023,13 +1503,14 @@ def screenshot(app: str = ""):
 # ---------- The schema Claude reads ----------
 # This tells Claude what tools exist, what they do, and their inputs.
 
-# Shared by the git tools and read_file
-ASK_FIRST = (" Works in any folder, but the first time a folder is used it replies that permission is "
-             "needed: ask the user, and only call again with confirmed true if they say yes.")
+# Shared by the tools that touch folders
+ASK_FIRST = (" Works in any folder. The first time a folder is used, the user is asked (in the terminal version it replies "
+             "that permission is needed: ask the user, and only call again with confirmed true if they say yes).")
 CONFIRMED = {
     "type": "boolean",
-    "description": "Leave out at first. Set to true only when calling again after the user said yes to this folder.",
+    "description": "Terminal version only: set to true when calling again after the user said yes to this folder.",
 }
+FOLDER = {"type": "string", "description": "A rough folder name or an exact path. Empty means Jarvis's workspace."}
 REPO = ("The repo folder: a rough name of a folder on the Desktop or in Documents or Downloads "
         "(e.g. 'csc216'), or an exact path like ~/PycharmProjects/pythonProject")
 
@@ -1090,18 +1571,175 @@ TOOL_SCHEMA = [
     },
     {
         "name": "read_file",
-        "description": "Read the contents of a text/code file (first 4000 chars). Never opens .env or key files." + ASK_FIRST,
+        "description": (
+            "Read a file. Text and code come back with line numbers (about 40,000 characters per call; use start_line "
+            "to read further), pictures come back as images you can see, and PDFs as documents. Never opens .env or "
+            "key files." + ASK_FIRST
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "filepath": {
                     "type": "string",
-                    "description": "Exact path (e.g. ~/PycharmProjects/pythonProject/main.py), or a rough file name "
-                                   "from the Desktop, Documents or Downloads",
+                    "description": "Exact path (e.g. ~/PycharmProjects/pythonProject/main.py), a path inside Jarvis's "
+                                   "workspace, or a rough file name from the Desktop, Documents or Downloads",
                 },
+                "start_line": {"type": "integer", "description": "First line to read (default 1)"},
+                "max_lines": {"type": "integer", "description": "Most lines to read (default: as many as fit)"},
                 "confirmed": CONFIRMED,
             },
             "required": ["filepath"],
+        },
+    },
+    {
+        "name": "write_file",
+        "description": (
+            "Create a file, or replace a whole file, with the given text: new code, scripts, notes, data. A relative "
+            "path goes in Jarvis's workspace; an exact path like C:/Users/Nikhil/Desktop/development/proj/Main.java "
+            "goes exactly there. Existing files are backed up first and keep their line endings. For small changes "
+            "to an existing file, use edit_file instead." + ASK_FIRST
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Where to write the file"},
+                "content": {"type": "string", "description": "The complete file contents"},
+                "confirmed": CONFIRMED,
+            },
+            "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "edit_file",
+        "description": (
+            "Change part of an existing text file by replacing old_text with new_text. old_text must match the file "
+            "exactly, indentation included (read the file first, and leave out read_file's line numbers). It must "
+            "appear exactly once unless replace_all is true. The file is backed up first, and the change shows in "
+            "the chat as a diff." + ASK_FIRST
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Exact path of the file, or a path inside the workspace"},
+                "old_text": {"type": "string", "description": "The exact text to replace"},
+                "new_text": {"type": "string", "description": "What to put in its place"},
+                "replace_all": {"type": "boolean", "description": "Replace every occurrence (default false)"},
+                "confirmed": CONFIRMED,
+            },
+            "required": ["path", "old_text", "new_text"],
+        },
+    },
+    {
+        "name": "find_files",
+        "description": "Find files by name pattern, like '*.py' or 'Main*.java', in a folder and its subfolders (skips .git, venv and node_modules)." + ASK_FIRST,
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "A file name pattern with * and ? wildcards"},
+                "folder": FOLDER,
+                "confirmed": CONFIRMED,
+            },
+            "required": ["pattern"],
+        },
+    },
+    {
+        "name": "search_text",
+        "description": "Search inside files for text or a regular expression, like grep. Returns path:line: text for each match." + ASK_FIRST,
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Text or a regular expression (case-insensitive)"},
+                "folder": FOLDER,
+                "file_pattern": {"type": "string", "description": "Only search files whose names match, e.g. '*.c' (default all)"},
+                "confirmed": CONFIRMED,
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "run_command",
+        "description": (
+            "Run a PowerShell command on the user's Windows PC and get its output (exit code, then stdout and stderr "
+            "together). Use it for real work: compiling, running programs and tests, git, pip installs, checking the "
+            "system. The user sees the exact command and approves it first, so write it plainly, one task per call. "
+            "Commands can't answer prompts, so pass flags like -y. Dashboard only."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "The PowerShell command"},
+                "folder": {"type": "string", "description": "Where to run it: a rough folder name or an exact path (empty = workspace)"},
+                "timeout": {"type": "integer", "description": "Seconds before it's stopped (default 120, max 900)"},
+            },
+            "required": ["command"],
+        },
+    },
+    {
+        "name": "run_python",
+        "description": (
+            "Run a Python script on the user's PC with Jarvis's own Python (numpy, requests and friends available), "
+            "after the user approves it, and get its output. Good for calculations, data work, quick experiments, and "
+            "making charts or files. Save pictures into the working folder (e.g. plt.savefig('chart.png')): new "
+            "pictures appear in the chat automatically. Dashboard only."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "The complete Python script"},
+                "folder": {"type": "string", "description": "Working folder: a rough name or exact path (empty = workspace)"},
+                "timeout": {"type": "integer", "description": "Seconds before it's stopped (default 120, max 900)"},
+            },
+            "required": ["code"],
+        },
+    },
+    {
+        "name": "create_visual",
+        "description": (
+            "Show a visual in the user's chat window when it explains something better than words: a diagram, chart, "
+            "drawing or small interactive demo. The user can open it large. kind:\n"
+            "- mermaid: Mermaid code (flowchart, sequenceDiagram, classDiagram, stateDiagram-v2, erDiagram, gantt, mindmap, ...)\n"
+            "- chart: a Chart.js config as JSON, e.g. {\"type\":\"bar\",\"data\":{\"labels\":[\"A\",\"B\"],"
+            "\"datasets\":[{\"label\":\"Score\",\"data\":[3,5]}]}}\n"
+            "- svg: a complete <svg> drawing (use a viewBox)\n"
+            "- html: a self-contained HTML page with inline CSS and JavaScript (no internet) for interactive demos or animations\n"
+            "Prefer mermaid or chart when they fit. For spoken requests, say the visual is in the chat. Dashboard only."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": list(VISUAL_KINDS)},
+                "title": {"type": "string", "description": "A short title shown above the visual"},
+                "content": {"type": "string", "description": "The Mermaid code, chart JSON, SVG or HTML"},
+            },
+            "required": ["kind", "title", "content"],
+        },
+    },
+    {
+        "name": "show_file",
+        "description": (
+            "Show a file from the user's PC in the chat window: pictures appear inline, text and code as a preview, "
+            "anything else as a card the user can open. Dashboard only." + ASK_FIRST
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Exact path, a path inside the workspace, or a rough file name"},
+                "confirmed": CONFIRMED,
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "search_chats",
+        "description": (
+            "Search the user's other chats with Jarvis for a topic, name or detail. Use it when the user refers to an "
+            "earlier conversation ('what did we decide about...', 'like last time') or when older context would "
+            "clearly help. Returns matching snippets with chat titles and dates. Dashboard only."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "Words to look for"}},
+            "required": ["query"],
         },
     },
     {
@@ -1228,6 +1866,27 @@ TOOL_SCHEMA = [
         },
     },
     {
+        "name": "answer_in_chat",
+        "description": (
+            "Keep this reply in the chat window, to be read with the eyes instead of read aloud. Call it BEFORE "
+            "you start writing, whenever the answer is something to look at rather than listen to: the solution to "
+            "a problem, an explanation of any length, code, maths, steps, a table or a list. After calling it, "
+            "write the full answer in Markdown, as long and as detailed as it needs to be - it is shown on screen, "
+            "and the only thing spoken is the one short line you pass in 'say'. Quick facts, confirmations and "
+            "conversation don't need this; just say those."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "say": {
+                    "type": "string",
+                    "description": "The one short line to read out, e.g. 'The solution is in the chat, sir.'",
+                }
+            },
+            "required": ["say"],
+        },
+    },
+    {
         "name": "show_links",
         "description": (
             "Put links in the user's chat window instead of saying them. Use it whenever a link would help: "
@@ -1271,9 +1930,12 @@ TOOL_SCHEMA = [
     {
         "name": "remember",
         "description": (
-            "Save a fact about the user to long-term memory so you still know it in future "
-            "sessions. Use it whenever the user asks you to remember something, such as a "
-            "repo location, a class schedule, or a preference. One short, self-contained fact per call."
+            "Save a fact or a standing instruction to long-term memory, so you still know it in future "
+            "sessions and in every chat. Use it whenever the user asks you to remember something, such as a "
+            "repo location, a class schedule, or how they want you to answer. One short, self-contained "
+            "line per call, written as an instruction if that is what it is. If it replaces something you "
+            "already remember, call forget on the old wording first - never save a second version of the "
+            "same rule. Remembering an instruction does not carry it out: follow it in this reply too."
         ),
         "input_schema": {
             "type": "object",
@@ -1284,6 +1946,15 @@ TOOL_SCHEMA = [
                                    "e.g. 'The algorithms repo is in Documents/cs/algo'",
                 }
             },
+            "required": ["fact"],
+        },
+    },
+    {
+        "name": "forget",
+        "description": "Remove a fact from long-term memory when the user asks you to forget it or says it's no longer true.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"fact": {"type": "string", "description": "The fact's wording, or a distinctive part of it"}},
             "required": ["fact"],
         },
     },
@@ -1306,14 +1977,31 @@ TOOL_FUNCTIONS = {
     "spotify_queue": spotify_queue,
     "spotify_control": spotify_control,
     "show_links": show_links,
+    "answer_in_chat": answer_in_chat,
     "screenshot": screenshot,
+    "write_file": write_file,
+    "edit_file": edit_file,
+    "find_files": find_files,
+    "search_text": search_text,
+    "run_command": run_command,
+    "run_python": run_python,
+    "create_visual": create_visual,
+    "show_file": show_file,
+    "search_chats": search_chats,
     "remember": remember,
+    "forget": forget,
 }
+DASHBOARD_ONLY = {"run_command", "run_python", "create_visual", "show_file", "search_chats", "answer_in_chat"}
 
 # ---------- Web (runs on Anthropic's servers — nothing to add to TOOL_FUNCTIONS) ----------
 # web_search: Claude searches the web (about 1 cent per search, plus tokens for the results).
 # web_fetch:  Claude reads a page it found (no extra fee, just tokens; capped at 5,000 here).
 TOOL_SCHEMA += [
-    {"type": "web_search_20250305", "name": "web_search", "max_uses": 3},
-    {"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 2, "max_content_tokens": 5000},
+    {"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
+    {"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 3, "max_content_tokens": 8000},
 ]
+
+
+def schema() -> list:
+    """The tools to offer Claude: everything in the dashboard; the terminal version skips the dashboard-only ones."""
+    return TOOL_SCHEMA if CHAT_WINDOW else [tool for tool in TOOL_SCHEMA if tool.get("name") not in DASHBOARD_ONLY]

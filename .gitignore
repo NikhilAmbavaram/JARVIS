@@ -4,6 +4,13 @@ memory.json
 settings.json
 CLAUDE.md
 
+# Jarvis's own files
+jarvis.db
+jarvis.db-*
+jarvis.log
+workspace/
+Jarvis.lnk
+
 # Python
 venv/
 __pycache__/

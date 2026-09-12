@@ -1,17 +1,7 @@
-// app.js — the dashboard page. It connects to gui.py over a WebSocket, draws the events Python
-// sends (state, chat, stats, weather, Spotify), and sends back what you type and click.
+// app.js — the dashboard page. It connects to gui.py over a WebSocket, draws the dashboard events
+// (state, stats, weather, Spotify, settings), hands everything about the conversation to chat.js,
+// and sends back what you type and click. Helpers ($, el, icon…) come from render.js.
 "use strict";
-
-const $ = (id) => document.getElementById(id);
-
-const TOOL_NAMES = {
-  git_status: "Git status", git_commit_all: "Git commit", git_push: "Git push", git_pull: "Git pull",
-  read_file: "Read file", list_files: "List files", open_app: "Open app", open_path: "Open file",
-  run_program: "Run program", create_note: "New note", add_to_note: "Add to note",
-  spotify_play: "Spotify", spotify_queue: "Spotify queue", spotify_control: "Spotify",
-  remember: "Memory", web_search: "Web search", web_fetch: "Read web page",
-  show_links: "Links", screenshot: "Screenshot",
-};
 
 const STATUS_TEXT = {
   offline: "Connecting to Jarvis…",
@@ -20,12 +10,19 @@ const STATUS_TEXT = {
   listening: "Listening…",
   thinking: "Thinking…",
   speaking: "Speaking…",
+  approval: "Waiting for your approval…",
   muted: "Microphone off",
   "voice-off": "Voice off · chat only",
   error: "Microphone problem",
 };
 
+const SHORT_STATUS = {
+  offline: "Offline", asleep: "Asleep", awake: "Awake", listening: "Listening", thinking: "Thinking",
+  speaking: "Speaking", approval: "Your call", muted: "Mic off", "voice-off": "Voice off", error: "Mic problem",
+};
+
 const WEATHER_ICONS = new Set(["clear", "night", "partly", "cloudy", "fog", "rain", "snow", "storm"]);
+const VIEW_KEY = "jarvis.view";
 
 const app = {
   socket: null,
@@ -35,47 +32,16 @@ const app = {
   micOn: false,
   voice: true,
   settings: {},
-  messages: [],
   started: null,
   spotify: null,
   spotifyAt: 0,
   level: 0,
   targetLevel: 0,
   activity: null,
+  view: "dashboard",
 };
 
 // ---------- small helpers ----------
-
-function el(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined && text !== null) node.textContent = text;
-  return node;
-}
-
-function icon(name) {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("class", "icon");
-  const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
-  use.setAttribute("href", `#${name}`);
-  svg.append(use);
-  return svg;
-}
-
-function setIcon(svg, name) {
-  svg.querySelector("use").setAttribute("href", `#${name}`);
-}
-
-function safeUrl(text) {
-  try {
-    const url = new URL(text);
-    return url.protocol === "https:" || url.protocol === "http:" ? url : null;
-  } catch {
-    return null;
-  }
-}
-
-const pad = (n) => String(n).padStart(2, "0");
 
 function duration(seconds) {
   seconds = Math.max(0, Math.floor(seconds));
@@ -87,13 +53,38 @@ function minutes(ms) {
   return `${Math.floor(s / 60)}:${pad(s % 60)}`;
 }
 
-const timeOf = (unixSeconds) =>
-  new Date(unixSeconds * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-
 const gib = (bytes) => bytes / 1024 ** 3;
 
 function setBar(id, percent) {
   $(id).style.width = `${Math.max(0, Math.min(100, percent || 0))}%`;
+}
+
+// ---------- views ----------
+
+function setView(view) {
+  app.view = view === "chats" ? "chats" : "dashboard";
+  document.body.dataset.view = app.view;
+  $(app.view === "chats" ? "slot-chats" : "slot-dashboard").append($("chat-card"));
+  for (const tab of document.querySelectorAll(".tab")) {
+    tab.classList.toggle("on", tab.dataset.view === app.view);
+    tab.setAttribute("aria-pressed", String(tab.dataset.view === app.view));
+  }
+  if (app.view === "dashboard") closeVisualPanel();
+  const log = $("chat-log");
+  log.scrollTop = log.scrollHeight;
+  try {
+    localStorage.setItem(VIEW_KEY, app.view);
+  } catch {
+    /* private browsing: the view just won't be remembered */
+  }
+}
+
+function savedView() {
+  try {
+    return localStorage.getItem(VIEW_KEY) === "chats" ? "chats" : "dashboard";
+  } catch {
+    return "dashboard";
+  }
 }
 
 // ---------- connection ----------
@@ -105,7 +96,8 @@ function connect() {
   socket.addEventListener("open", () => {
     app.connected = true;
     app.retries = 0;
-    resetChat();   // the server replays the conversation right after connecting
+    Chat.streams.clear();     // the server replays everything right after connecting
+    Chat.approvals.clear();
     setConnected(true);
   });
 
@@ -143,9 +135,6 @@ function setConnected(online) {
 function handle(event) {
   switch (event.type) {
     case "state": return renderState(event);
-    case "message": return addMessage(event);
-    case "clear": return resetChat();
-    case "activity": return renderActivity(event.tool);
     case "heard": return showCaption(event.text);
     case "level": app.targetLevel = Math.max(app.targetLevel, event.value || 0); return;
     case "stats": return renderStats(event);
@@ -153,6 +142,11 @@ function handle(event) {
     case "weather": return renderWeather(event);
     case "spotify": return renderSpotify(event);
     case "settings": return renderSettings(event);
+    case "models":
+      chatHandle(event);
+      if (app.settings.new_chat_model) $("set-new-model").value = app.settings.new_chat_model;
+      return;
+    default: return chatHandle(event);   // chats, messages, deltas, approvals, memory
   }
 }
 
@@ -169,10 +163,16 @@ function renderState(event) {
   $("orb").dataset.state = state;
   $("status").dataset.state = state;
   let text = STATUS_TEXT[state] || state;
-  if (state === "thinking" && app.activity) text = `${TOOL_NAMES[app.activity] || app.activity}…`;
+  if (state === "thinking" && app.activity) text = `${toolName(app.activity)}…`;
   if (state === "error" && event.detail) text = event.detail;
   $("status-text").textContent = text;
   $("status").title = event.detail || "";
+
+  const pill = $("voice-pill");
+  pill.dataset.state = state;
+  $("voice-pill-text").textContent = state === "thinking" && app.activity ? `${toolName(app.activity)}…` : SHORT_STATUS[state] || state;
+  setIcon(pill.querySelector("svg"), state === "speaking" ? "i-stop" : app.micOn ? "i-mic" : "i-mic-off");
+  pill.disabled = !app.connected || (!app.voice && state !== "speaking");
 
   const micBtn = $("mic-btn");
   micBtn.setAttribute("aria-pressed", String(!app.micOn));
@@ -200,14 +200,15 @@ function renderState(event) {
     ? "Turn off to stop using the microphone."
     : "Voice is off (started with --no-voice, or the microphone isn't available).";
 
-  if (state === "thinking" || previous === "thinking") renderTyping();
+  setGenerating(!!event.generating);
+  if (state === "thinking" || previous === "thinking") app.activity = app.activity || null;
 }
 
 function renderActivity(tool) {
   app.activity = tool;
   if (app.state === "thinking") {
-    $("status-text").textContent = `${TOOL_NAMES[tool] || tool}…`;
-    renderTyping();
+    $("status-text").textContent = `${toolName(tool)}…`;
+    $("voice-pill-text").textContent = `${toolName(tool)}…`;
   }
 }
 
@@ -218,6 +219,27 @@ function showCaption(text) {
   caption.classList.add("show");
   clearTimeout(captionTimer);
   captionTimer = setTimeout(() => caption.classList.remove("show"), 6000);
+  if (app.view === "chats") toast(`Heard: “${text}”`);
+}
+
+// an approval is the one thing Jarvis genuinely can't get on with alone, so it's worth a nudge
+function notifyApproval(approval) {
+  if (app.view === "dashboard" && approval.chat_id !== Chat.activeId) return;   // chat.js already offered to open it
+  flashTitle("Jarvis needs an answer");
+}
+
+let titleTimer = null;
+function flashTitle(text) {
+  const original = document.title;
+  clearInterval(titleTimer);
+  let on = false;
+  titleTimer = setInterval(() => {
+    document.title = (on = !on) ? text : original;
+    if (!document.hidden && !Chat.approvals.size) {
+      clearInterval(titleTimer);
+      document.title = original;
+    }
+  }, 1200);
 }
 
 // ---------- the orb animation ----------
@@ -237,176 +259,15 @@ function animate(time) {
   else amount = 0.04;
   if (calm.matches) amount = Math.min(amount, 0.3);
 
-  bars.forEach((bar, i) => {
-    const wave = state === "thinking" ? Math.sin(time / 150 - i * 0.9) : Math.sin(time / 280 + i * 1.4);
-    const height = 0.16 + amount * BAR_SHAPE[i] * (0.72 + 0.28 * wave);
-    bar.style.transform = `scaleY(${Math.min(1, height).toFixed(3)})`;
-  });
-  $("orb").style.setProperty("--level", Math.min(1, app.level).toFixed(3));
+  if (app.view === "dashboard") {
+    bars.forEach((bar, i) => {
+      const wave = state === "thinking" ? Math.sin(time / 150 - i * 0.9) : Math.sin(time / 280 + i * 1.4);
+      const height = 0.16 + amount * BAR_SHAPE[i] * (0.72 + 0.28 * wave);
+      bar.style.transform = `scaleY(${Math.min(1, height).toFixed(3)})`;
+    });
+    $("orb").style.setProperty("--level", Math.min(1, app.level).toFixed(3));
+  }
   requestAnimationFrame(animate);
-}
-
-// ---------- conversation ----------
-
-function resetChat() {
-  app.messages = [];
-  $("chat-log").replaceChildren();
-  renderGreeting();
-  renderTyping();
-}
-
-function renderGreeting() {
-  if (app.messages.length) return;
-  const hour = new Date().getHours();
-  const part = hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening";
-  const row = el("div", "msg from-jarvis greeting");
-  row.id = "greeting";
-  const bubble = el("div", "bubble");
-  bubble.append(el("p", "msg-text", `Good ${part}, sir. Say “Hey Jarvis”, or type below.`));
-  row.append(bubble);
-  $("chat-log").append(row);
-}
-
-function nearBottom(log) {
-  return log.scrollHeight - log.scrollTop - log.clientHeight < 120;
-}
-
-function addMessage(message) {
-  app.messages.push(message);
-  const log = $("chat-log");
-  const stick = nearBottom(log) || message.role === "user";
-  $("greeting")?.remove();
-
-  const fromUser = message.role === "user";
-  const row = el("div", `msg ${fromUser ? "from-user" : "from-jarvis"}`);
-  const bubble = el("div", "bubble");
-  bubble.append(el("p", "msg-text", message.text));
-
-  const shots = (message.screenshots || []).filter((shot) => /^data:image\/jpeg;base64,/.test(shot.image || ""));
-  if (shots.length) {
-    const box = el("div", "shots");
-    for (const shot of shots) {
-      const button = el("button", "shot");
-      button.type = "button";
-      const img = new Image();
-      img.src = shot.image;
-      img.alt = `Screenshot of ${shot.label}`;
-      button.append(img, el("span", "shot-label", shot.label));
-      button.addEventListener("click", () => openLightbox(shot));
-      box.append(button);
-    }
-    bubble.append(box);
-  }
-
-  const links = (message.links || []).map((link) => ({ ...link, parsed: safeUrl(link.url) })).filter((l) => l.parsed);
-  if (links.length) {
-    const box = el("div", "links");
-    for (const link of links) {
-      const host = link.parsed.hostname.replace(/^www\./, "");
-      const a = el("a", "link-chip");
-      a.href = link.parsed.href;
-      a.target = "_blank";
-      a.rel = "noopener noreferrer";
-      a.title = link.parsed.href;
-      a.append(icon("i-link"), el("span", "link-title", link.title && link.title !== link.url ? link.title : host));
-      a.append(el("span", "link-host", host));
-      box.append(a);
-    }
-    bubble.append(box);
-  }
-
-  const meta = el("div", "msg-meta");
-  meta.append(el("span", "", timeOf(message.time)));
-  if (fromUser && message.source === "voice") meta.append(el("span", "tag", "voice"));
-  for (const tool of message.tools || []) meta.append(el("span", "tag tool", TOOL_NAMES[tool] || tool));
-  if (message.error) {
-    const tag = el("span", "tag error", "error");
-    tag.title = message.error;
-    meta.append(tag);
-  }
-  bubble.append(meta);
-  row.append(bubble);
-  log.append(row);
-  renderTyping();
-  if (stick) log.scrollTop = log.scrollHeight;
-}
-
-function renderTyping() {
-  const log = $("chat-log");
-  let row = $("typing");
-  if (app.state !== "thinking") {
-    row?.remove();
-    return;
-  }
-  if (!row) {
-    row = el("div", "msg from-jarvis typing");
-    row.id = "typing";
-    const bubble = el("div", "bubble");
-    const dots = el("span", "dots");
-    dots.append(el("i"), el("i"), el("i"));
-    bubble.append(dots, el("span", "typing-text"));
-    row.append(bubble);
-  }
-  row.querySelector(".typing-text").textContent = app.activity ? `${TOOL_NAMES[app.activity] || app.activity}…` : "Thinking…";
-  const stick = nearBottom(log);
-  log.append(row);   // always the last thing in the log
-  if (stick) log.scrollTop = log.scrollHeight;
-}
-
-function exportChat() {
-  if (!app.messages.length) return flashButton($("export-btn"), "Nothing yet");
-  const lines = ["# Conversation with Jarvis", "", `Exported ${new Date().toLocaleString()}`, ""];
-  for (const m of app.messages) {
-    const who = m.role === "user" ? "You" : "Jarvis";
-    const how = m.role === "user" && m.source === "voice" ? " (voice)" : "";
-    lines.push(`**${who}**${how} · ${timeOf(m.time)}`, "", m.text, "");
-    for (const shot of m.screenshots || []) lines.push(`*Screenshot: ${shot.label}*`, "");
-    for (const link of m.links || []) lines.push(`- [${String(link.title || link.url).replace(/[[\]]/g, "")}](${link.url})`);
-    if ((m.links || []).length) lines.push("");
-  }
-  const blob = new Blob([lines.join("\n")], { type: "text/markdown" });
-  const a = el("a");
-  const d = new Date();
-  a.href = URL.createObjectURL(blob);
-  a.download = `jarvis-conversation-${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.md`;
-  document.body.append(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-}
-
-function flashButton(button, text) {
-  const label = button.querySelector("span");
-  const original = label.textContent;
-  label.textContent = text;
-  setTimeout(() => (label.textContent = original), 1500);
-}
-
-let clearTimer = null;
-function clearClicked() {
-  const button = $("clear-btn");
-  if (button.classList.contains("confirm")) {
-    resetClear();
-    send({ type: "clear" });
-    return;
-  }
-  if (!app.messages.length) return;
-  button.classList.add("confirm");
-  $("clear-label").textContent = "Clear all?";
-  clearTimer = setTimeout(resetClear, 3000);
-}
-
-function resetClear() {
-  clearTimeout(clearTimer);
-  $("clear-btn").classList.remove("confirm");
-  $("clear-label").textContent = "Clear";
-}
-
-function openLightbox(shot) {
-  $("lightbox-img").src = shot.image;
-  $("lightbox-img").alt = `Screenshot of ${shot.label}`;
-  $("lightbox-label").textContent = shot.label;
-  $("lightbox").showModal();
 }
 
 // ---------- side cards ----------
@@ -527,7 +388,9 @@ function tickSpotify() {
 function renderSettings(s) {
   app.settings = s;
   $("set-speak-typed").checked = !!s.speak_typed;
+  $("set-quiet-answers").checked = !!s.quiet_answers;
   $("set-show-tools").checked = !!s.show_tools;
+  if (Chat.models.length) $("set-new-model").value = s.new_chat_model;
   if (document.activeElement !== $("set-city")) $("set-city").value = s.weather_city || "";
   for (const radio of document.querySelectorAll('input[name="units"]')) radio.checked = radio.value === s.units;
   $("chat-log").classList.toggle("hide-tools", !s.show_tools);
@@ -550,20 +413,14 @@ function tickClock() {
 // ---------- wiring ----------
 
 function wire() {
-  $("chat-form").addEventListener("submit", (event) => {
-    event.preventDefault();
-    const input = $("chat-text");
-    const text = input.value.trim();
-    if (!text || !app.connected) return;
-    send({ type: "send", text });
-    input.value = "";
-  });
+  for (const tab of document.querySelectorAll(".tab")) {
+    tab.addEventListener("click", () => setView(tab.dataset.view));
+  }
 
   $("talk-btn").addEventListener("click", () => send({ type: "talk" }));
+  $("voice-pill").addEventListener("click", () => send({ type: "talk" }));
   $("mic-btn").addEventListener("click", () => send({ type: "mic", on: !app.micOn }));
   $("keys-btn").addEventListener("click", () => $("chat-text").focus());
-  $("clear-btn").addEventListener("click", clearClicked);
-  $("export-btn").addEventListener("click", exportChat);
 
   for (const button of document.querySelectorAll("[data-refresh]")) {
     button.addEventListener("click", () => {
@@ -580,7 +437,9 @@ function wire() {
   $("settings-btn").addEventListener("click", () => $("settings-dialog").showModal());
   $("set-mic").addEventListener("change", (e) => send({ type: "mic", on: e.target.checked }));
   $("set-speak-typed").addEventListener("change", (e) => saveSetting({ speak_typed: e.target.checked }));
+  $("set-quiet-answers").addEventListener("change", (e) => saveSetting({ quiet_answers: e.target.checked }));
   $("set-show-tools").addEventListener("change", (e) => saveSetting({ show_tools: e.target.checked }));
+  $("set-new-model").addEventListener("change", (e) => saveSetting({ new_chat_model: e.target.value }));
   $("city-form").addEventListener("submit", (event) => {
     event.preventDefault();
     const city = $("set-city").value.trim();
@@ -591,23 +450,27 @@ function wire() {
     radio.addEventListener("change", () => saveSetting({ units: radio.value }));
   }
 
-  $("lightbox").addEventListener("click", (event) => {
-    if (event.target === $("lightbox")) $("lightbox").close();   // click outside the picture
-  });
-
   document.addEventListener("keydown", (event) => {
-    const typing = ["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName);
-    if (event.key === "/" && !typing && !document.querySelector("dialog[open]")) {
+    const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
+    const dialogOpen = document.querySelector("dialog[open]");
+    if (event.key === "/" && !typing && !dialogOpen) {
       event.preventDefault();
       $("chat-text").focus();
-    } else if (event.key === "Escape" && app.state === "speaking" && !document.querySelector("dialog[open]")) {
-      send({ type: "stop" });
+    } else if (event.key === "Escape" && !dialogOpen) {
+      if (Chat.generating || app.state === "speaking") send({ type: "stop" });
+      else if (!$("visual-panel").hidden) closeVisualPanel();
+    } else if (event.key.toLowerCase() === "o" && event.ctrlKey && event.shiftKey) {
+      event.preventDefault();
+      send({ type: "chat_new" });
+      setView("chats");
     }
   });
 }
 
 wire();
-resetChat();
+wireChat();
+setView(savedView());
+setGenerating(false);
 tickClock();
 setInterval(tickClock, 1000);
 requestAnimationFrame(animate);

@@ -4,13 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>J.A.R.V.I.S</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='27' fill='none' stroke='%23a855f7' stroke-width='5'/%3E%3Ccircle cx='32' cy='32' r='13' fill='%23c084fc'/%3E%3C/svg%3E">
+  <link rel="icon" type="image/x-icon" href="/ui/jarvis.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700&family=Outfit:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/ui/vendor/katex/katex.min.css">
   <link rel="stylesheet" href="/ui/style.css">
 </head>
-<body>
+<body data-view="dashboard">
   <!-- Icons, drawn once and reused with <use href="#i-name"> -->
   <svg width="0" height="0" style="position:absolute" aria-hidden="true">
     <defs>
@@ -35,6 +36,28 @@
       <symbol id="i-next" viewBox="0 0 24 24"><path d="M6 6l9 6-9 6V6Z" fill="currentColor"/><path d="M18 6v12"/></symbol>
       <symbol id="i-prev" viewBox="0 0 24 24"><path d="M18 6l-9 6 9 6V6Z" fill="currentColor"/><path d="M6 6v12"/></symbol>
       <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+      <!-- chat, files and visuals -->
+      <symbol id="i-chat" viewBox="0 0 24 24"><path d="M20 14.5a2.5 2.5 0 0 1-2.5 2.5H8l-4 3.5V6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5Z"/></symbol>
+      <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></symbol>
+      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5"/></symbol>
+      <symbol id="i-pen" viewBox="0 0 24 24"><path d="M4 20h4L19.5 8.5a2.1 2.1 0 0 0-3-3L5 17v3Z"/><path d="m14.5 6.5 3 3"/></symbol>
+      <symbol id="i-pin" viewBox="0 0 24 24"><path d="M9 3h6l-1 6 4 3.5V15H6v-2.5L10 9 9 3Z"/><path d="M12 15v6"/></symbol>
+      <symbol id="i-brain" viewBox="0 0 24 24"><path d="M12 5.5a3 3 0 0 0-5.8-1A3 3 0 0 0 4 9.4a3 3 0 0 0 .6 5 3 3 0 0 0 5.6 1.9"/><path d="M12 5.5a3 3 0 0 1 5.8-1A3 3 0 0 1 20 9.4a3 3 0 0 1-.6 5 3 3 0 0 1-5.6 1.9"/><path d="M12 5.5v14"/></symbol>
+      <symbol id="i-diagram" viewBox="0 0 24 24"><rect x="8.5" y="3" width="7" height="5" rx="1.5"/><rect x="2.5" y="16" width="7" height="5" rx="1.5"/><rect x="14.5" y="16" width="7" height="5" rx="1.5"/><path d="M12 8v4M6 16v-2.5h12V16"/></symbol>
+      <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 20V4M4 20h16"/><rect x="7.5" y="11" width="3.4" height="6" rx="1"/><rect x="13.5" y="7" width="3.4" height="10" rx="1"/></symbol>
+      <symbol id="i-code" viewBox="0 0 24 24"><path d="m9 8-5 4 5 4M15 8l5 4-5 4"/></symbol>
+      <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="16" rx="2"/><path d="m7 10 3 2.5L7 15M13 15h4"/></symbol>
+      <symbol id="i-file" viewBox="0 0 24 24"><path d="M13.5 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5L13.5 3Z"/><path d="M13.5 3v5.5H19"/></symbol>
+      <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2"/><circle cx="8.5" cy="10" r="1.6"/><path d="m4 17 5-5 4 3.5 3-2.5 4 4"/></symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2.5h8.5A1.5 1.5 0 0 1 21 10v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18Z"/></symbol>
+      <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6"/><path d="M20 4 11 13"/><path d="M18 14v5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 4 19V8a1.5 1.5 0 0 1 1.5-1.5H10"/></symbol>
+      <symbol id="i-expand" viewBox="0 0 24 24"><path d="M4 9V4h5M20 15v5h-5M15 4h5v5M9 20H4v-5"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7"/></symbol>
+      <symbol id="i-paperclip" viewBox="0 0 24 24"><path d="M20 11.5 12 19.5a5 5 0 0 1-7-7l8.5-8.5a3.4 3.4 0 0 1 4.8 4.8l-8.4 8.4a1.8 1.8 0 0 1-2.5-2.5l7.8-7.8"/></symbol>
+      <!-- weather -->
       <symbol id="w-clear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M4.6 4.6l1.6 1.6M17.8 17.8l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.6 19.4l1.6-1.6M17.8 6.2l1.6-1.6"/></symbol>
       <symbol id="w-night" viewBox="0 0 24 24"><path d="M19.5 14.5A7.5 7.5 0 1 1 9.5 4.5a6 6 0 0 0 10 10Z"/></symbol>
       <symbol id="w-partly" viewBox="0 0 24 24"><path d="M8 3.5v1.5M3.5 8H5M4.8 4.8l1 1M11.2 4.8l-1 1"/><path d="M5.3 11A3.5 3.5 0 0 1 11.5 7"/><path d="M9 20h8a3.5 3.5 0 0 0 .4-7 5 5 0 0 0-9.5-.8A3.9 3.9 0 0 0 9 20Z"/></symbol>
@@ -51,6 +74,14 @@
       <div class="brand">
         <span class="brand-name">J.A.R.V.I.S</span>
         <span class="badge offline" id="link-badge"><i class="dot"></i><span id="link-text">Connecting</span></span>
+        <nav class="tabs" aria-label="Views">
+          <button class="tab" type="button" data-view="dashboard" id="tab-dashboard">
+            <svg class="icon"><use href="#i-grid"/></svg><span>Dashboard</span>
+          </button>
+          <button class="tab" type="button" data-view="chats" id="tab-chats">
+            <svg class="icon"><use href="#i-chat"/></svg><span>Chats</span>
+          </button>
+        </nav>
       </div>
 
       <div class="clock-pill" aria-label="Current time">
@@ -61,6 +92,10 @@
       </div>
 
       <div class="top-actions">
+        <button class="voice-pill" type="button" id="voice-pill" title="Wake Jarvis">
+          <i class="dot"></i><span id="voice-pill-text">Connecting…</span>
+          <svg class="icon"><use href="#i-mic"/></svg>
+        </button>
         <div class="chip" id="weather-chip" title="Weather">
           <svg class="icon"><use href="#i-thermo"/></svg>
           <span class="mono" id="chip-temp">--°</span>
@@ -72,7 +107,8 @@
       </div>
     </header>
 
-    <main class="layout">
+    <!-- ---------- Dashboard view ---------- -->
+    <main class="layout" id="dashboard-view">
       <aside class="side">
         <section class="card" aria-labelledby="stats-title">
           <div class="card-head">
@@ -201,28 +237,86 @@
         </div>
       </section>
 
-      <section class="card chat" aria-labelledby="chat-title">
-        <div class="chat-head">
-          <h2 id="chat-title">Conversation</h2>
-          <div class="chat-actions">
-            <button class="pill-btn" type="button" id="clear-btn" title="Clear the conversation">
-              <svg class="icon"><use href="#i-trash"/></svg><span id="clear-label">Clear</span>
-            </button>
-            <button class="pill-btn" type="button" id="export-btn" title="Save the conversation as a Markdown file">
-              <svg class="icon"><use href="#i-download"/></svg><span>Export</span>
-            </button>
-          </div>
+      <div class="chat-slot" id="slot-dashboard"></div>
+    </main>
+
+    <!-- ---------- Chats view ---------- -->
+    <main class="chats-layout" id="chats-view">
+      <aside class="chat-side">
+        <button class="new-chat" type="button" id="sidebar-new">
+          <svg class="icon"><use href="#i-plus"/></svg><span>New chat</span>
+        </button>
+        <div class="search-box">
+          <svg class="icon"><use href="#i-search"/></svg>
+          <input id="chat-search" type="search" placeholder="Search chats…" aria-label="Search chats" maxlength="200">
         </div>
-        <div class="chat-log" id="chat-log" role="log" aria-live="polite"></div>
-        <form class="chat-input" id="chat-form" autocomplete="off">
-          <input id="chat-text" type="text" placeholder="Type a message…" aria-label="Message Jarvis" maxlength="4000" disabled>
-          <button class="send-btn" type="submit" aria-label="Send" disabled id="send-btn">
-            <svg class="icon"><use href="#i-send"/></svg>
-          </button>
-        </form>
+        <div class="chat-list" id="chat-list"></div>
+        <button class="side-foot" type="button" id="memory-btn" title="What Jarvis remembers about you">
+          <svg class="icon"><use href="#i-brain"/></svg><span>Memory</span><b id="memory-count">0</b>
+        </button>
+      </aside>
+
+      <div class="chat-slot" id="slot-chats"></div>
+
+      <section class="visual-panel" id="visual-panel" hidden aria-label="Visual">
+        <div class="panel-head">
+          <h2 id="panel-title">Visual</h2>
+          <div class="panel-tabs">
+            <button class="mini-pill on" type="button" id="panel-preview"><svg class="icon"><use href="#i-image"/></svg><span>Preview</span></button>
+            <button class="mini-pill" type="button" id="panel-source"><svg class="icon"><use href="#i-code"/></svg><span>Source</span></button>
+          </div>
+          <button class="mini-btn" type="button" id="panel-close" title="Close" aria-label="Close the visual"><svg class="icon"><use href="#i-close"/></svg></button>
+        </div>
+        <div class="panel-body" id="panel-body"></div>
       </section>
     </main>
   </div>
+
+  <!-- The conversation card. app.js moves it between the two views. -->
+  <section class="card chat" id="chat-card" aria-labelledby="chat-title">
+    <div class="chat-head">
+      <button class="title-btn" type="button" id="chat-title-btn" title="Switch chats">
+        <svg class="icon"><use href="#i-chat"/></svg>
+        <h2 id="chat-title">New chat</h2>
+        <svg class="icon caret"><use href="#i-chevron"/></svg>
+      </button>
+      <div class="chat-actions">
+        <label class="think" title="Let Claude think longer before answering">
+          <input type="checkbox" id="think-toggle"><span>Think harder</span>
+        </label>
+        <select id="model-select" aria-label="Model for this chat"></select>
+        <button class="mini-btn" type="button" id="new-chat-btn" title="New chat (Ctrl+Shift+O)" aria-label="New chat"><svg class="icon"><use href="#i-plus"/></svg></button>
+        <button class="mini-btn" type="button" id="export-btn" title="Save this chat as Markdown" aria-label="Export this chat"><svg class="icon"><use href="#i-download"/></svg></button>
+      </div>
+      <div class="popover" id="chat-switcher" hidden>
+        <div class="switcher-list" id="switcher-list"></div>
+        <div class="popover-foot">
+          <button class="mini-pill" type="button" id="switcher-new"><svg class="icon"><use href="#i-plus"/></svg><span>New chat</span></button>
+          <button class="mini-pill" type="button" id="switcher-all"><svg class="icon"><use href="#i-chat"/></svg><span>All chats</span></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="chat-log" id="chat-log" role="log" aria-live="polite"></div>
+
+    <form class="composer" id="chat-form" autocomplete="off">
+      <div class="attachments" id="attachments" hidden></div>
+      <div class="composer-row">
+        <button class="mini-btn" type="button" id="attach-btn" title="Attach files" aria-label="Attach files"><svg class="icon"><use href="#i-paperclip"/></svg></button>
+        <textarea id="chat-text" rows="1" placeholder="Message Jarvis…  ( / to focus, Shift+Enter for a new line )" aria-label="Message Jarvis" maxlength="100000" disabled></textarea>
+        <button class="send-btn" type="submit" id="send-btn" title="Send (Enter)" aria-label="Send" disabled>
+          <svg class="icon"><use href="#i-send"/></svg>
+        </button>
+      </div>
+      <input id="file-input" type="file" multiple hidden aria-hidden="true" tabindex="-1">
+    </form>
+
+    <div class="drop-overlay" id="drop-overlay" hidden>
+      <svg class="icon"><use href="#i-paperclip"/></svg><span>Drop files to attach</span>
+    </div>
+  </section>
+
+  <div class="toast" id="toast" role="status" hidden></div>
 
   <dialog id="settings-dialog" aria-labelledby="settings-title">
     <form method="dialog" class="dialog-head">
@@ -239,8 +333,16 @@
         <span><b>Speak replies to typed messages</b><small>Off: typing gets a text reply, talking gets a spoken one.</small></span>
         <span class="switch"><input type="checkbox" id="set-speak-typed"></span>
       </label>
+      <label class="setting">
+        <span><b>Keep real answers in the chat</b><small>Solutions, code, maths and long explanations are written out to read, not read aloud. Quick replies are still spoken.</small></span>
+        <span class="switch"><input type="checkbox" id="set-quiet-answers"></span>
+      </label>
 
       <h3>Chat</h3>
+      <label class="setting">
+        <span><b>Model for new chats</b><small>Voice always answers on Haiku, for speed.</small></span>
+        <select id="set-new-model" aria-label="Model for new chats"></select>
+      </label>
       <label class="setting">
         <span><b>Show tools Jarvis used</b><small>Little tags under replies, like “Web search”.</small></span>
         <span class="switch"><input type="checkbox" id="set-show-tools"></span>
@@ -259,8 +361,31 @@
         </span>
       </div>
 
-      <p class="dialog-foot">Shortcuts: <kbd>/</kbd> type a message · <kbd>Esc</kbd> stop speaking</p>
+      <p class="dialog-foot">Shortcuts: <kbd>/</kbd> type a message · <kbd>Esc</kbd> stop · <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd> new chat</p>
     </div>
+  </dialog>
+
+  <dialog id="memory-dialog" aria-labelledby="memory-title">
+    <form method="dialog" class="dialog-head">
+      <h2 id="memory-title">What Jarvis remembers</h2>
+      <button class="icon-btn small" value="close" aria-label="Close"><svg class="icon"><use href="#i-close"/></svg></button>
+    </form>
+    <div class="dialog-body">
+      <p class="dialog-note">Shared by every chat, and sent with every message.</p>
+      <ul class="memory-list" id="memory-list"></ul>
+      <form class="memory-add" id="memory-form">
+        <input id="memory-input" type="text" maxlength="500" placeholder="Add something to remember…" aria-label="New fact">
+        <button class="pill-btn primary" type="submit"><svg class="icon"><use href="#i-plus"/></svg><span>Add</span></button>
+      </form>
+    </div>
+  </dialog>
+
+  <dialog id="visual-dialog" aria-labelledby="visual-dialog-title">
+    <form method="dialog" class="dialog-head">
+      <h2 id="visual-dialog-title">Visual</h2>
+      <button class="icon-btn small" value="close" aria-label="Close"><svg class="icon"><use href="#i-close"/></svg></button>
+    </form>
+    <div class="dialog-body" id="visual-dialog-body"></div>
   </dialog>
 
   <dialog id="lightbox" aria-label="Screenshot">
@@ -269,6 +394,16 @@
     <p id="lightbox-label"></p>
   </dialog>
 
+  <script src="/ui/vendor/marked.umd.js"></script>
+  <script src="/ui/vendor/purify.min.js"></script>
+  <script src="/ui/vendor/highlight.min.js"></script>
+  <script src="/ui/vendor/hljs-powershell.min.js"></script>
+  <script src="/ui/vendor/hljs-matlab.min.js"></script>
+  <script src="/ui/vendor/hljs-dos.min.js"></script>
+  <script src="/ui/vendor/katex/katex.min.js"></script>
+  <script src="/ui/vendor/chart.umd.min.js"></script>
+  <script src="/ui/render.js"></script>
+  <script src="/ui/chat.js"></script>
   <script src="/ui/app.js"></script>
 </body>
 </html>

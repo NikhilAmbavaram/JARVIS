@@ -1,17 +1,21 @@
-# gui.py — Jarvis with a dashboard: the voice loop plus a control panel in its own window
+# gui.py — Jarvis with a dashboard: the voice loop, saved chats and a control panel in its own window
 #
 #   python .\gui.py              opens the dashboard in an Edge app window
 #   python .\gui.py --browser    opens it in a normal browser tab instead
 #   python .\gui.py --no-voice   chat only: no microphone or speakers
 #
 # How it fits together: this file runs a small web server on 127.0.0.1, so only this PC can reach it.
-# The page in ui/ connects over a WebSocket. Python pushes events to the page (state, chat messages,
-# stats, weather, Spotify) and the page sends commands back (typed messages, buttons, settings).
-# The voice loop from jarvis.py runs in a background thread and shares one Brain with the chat box.
+# The page in ui/ connects over a WebSocket. Python pushes events to the page (state, chats, replies as
+# they're written, stats, weather, Spotify, approval requests) and the page sends commands back (messages,
+# buttons, approvals, settings). The voice loop from jarvis.py runs in a background thread. Chats are saved
+# in jarvis.db (chats.py); memory.json facts are shared by all of them.
 
 import argparse
 import asyncio
+import base64
+import io
 import json
+import os
 import random
 import socket
 import subprocess
@@ -30,26 +34,50 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+import config
 import dashboard
+import memory
 import tools
-from brain import Brain, for_speech
+from brain import Brain, belongs_on_screen, for_speech
+from chats import ChatStore
 
 HERE = Path(__file__).parent
 UI_DIR = HERE / "ui"
 SETTINGS_FILE = HERE / "settings.json"
 DEFAULT_PORT = 8765
 
+MODELS = [   # the chat model picker (prices per million input/output tokens, checked Sept 2026)
+    {"id": "claude-opus-5", "label": "Opus 5", "note": "Best for coding and hard problems · $5 / $25"},
+    {"id": "claude-sonnet-5", "label": "Sonnet 5", "note": "Strong and cheaper · $2 / $10"},
+    {"id": "claude-haiku-4-5", "label": "Haiku 4.5", "note": "Fastest and cheapest · $1 / $5"},
+    {"id": "claude-fable-5-1", "label": "Fable 5.1", "note": "Most capable, most expensive · $10 / $50"},
+]
+MODEL_IDS = {model["id"] for model in MODELS}
+
 DEFAULT_SETTINGS = {
-    "speak_typed": False,           # also say replies to typed messages out loud
-    "show_tools": True,             # show which tools Jarvis used under his replies
+    "speak_typed": False,             # also say replies to typed messages out loud
+    "quiet_answers": True,            # a real answer goes in the chat to be read, not read aloud
+    "show_tools": True,               # show which tools Jarvis used under his replies
     "weather_city": "Raleigh, NC",
-    "units": "imperial",            # "imperial" (°F, mph) or "metric" (°C, km/h)
+    "units": "imperial",              # "imperial" (°F, mph) or "metric" (°C, km/h)
+    "new_chat_model": config.CHAT_MODEL,
 }
+
+# What Jarvis says out loud when the answer itself stays on screen
+IN_THE_CHAT = ["It's in the chat, sir.", "The answer's in the chat, sir.", "Written out in the chat, sir.",
+               "I've put it in the chat, sir."]
 
 LEVEL_GAIN = {"wake": 30.0, "listen": 14.0, "speak": 5.0}   # evens out loudness so the orb moves the same for each
 STATS_EVERY, WEATHER_EVERY = 2, 600                          # seconds
 SPOTIFY_EVERY, SPOTIFY_OFFLINE_EVERY = 5, 30
-CLOSE_GRACE = 10   # seconds to wait for the page to come back (a reload) before quitting when its window closes
+CLOSE_GRACE = 10          # seconds to wait for the page to come back (a reload) before quitting when its window closes
+APPROVAL_TIMEOUT = 600    # an unanswered approval counts as "no" after this many seconds
+MAX_ATTACHMENT = 30_000_000
+
+YES_WORDS = {"yes", "yeah", "yep", "yup", "sure", "ok", "okay", "go ahead", "do it", "run it", "approve", "approved",
+             "allow", "allow it", "affirmative", "yes please", "please do", "go for it", "yes sir", "proceed"}
+NO_WORDS = {"no", "nope", "nah", "deny", "denied", "cancel", "stop", "dont", "do not", "negative", "no thanks",
+            "never mind", "nevermind", "dont do it", "no sir"}
 
 
 # ---------- Settings ----------
@@ -61,6 +89,8 @@ def load_settings() -> dict:
         settings.update({key: value for key, value in saved.items() if key in DEFAULT_SETTINGS})
     except (OSError, ValueError):
         pass   # no settings file yet, or a broken one: use the defaults
+    if settings["new_chat_model"] not in MODEL_IDS:
+        settings["new_chat_model"] = config.CHAT_MODEL
     return settings
 
 
@@ -76,10 +106,9 @@ class Hub:
     KEEP_LATEST = {"state", "stats", "weather", "spotify", "settings", "counters"}
 
     def __init__(self):
-        self.loop = None               # the web server's event loop, set when the server starts
-        self.queues = set()            # one queue per open page
-        self.chat = deque(maxlen=200)  # replayed to a page when it connects or reloads
-        self.latest = {}               # newest event of each KEEP_LATEST type, for the same reason
+        self.loop = None       # the web server's event loop, set when the server starts
+        self.queues = set()    # one queue per open page
+        self.latest = {}       # newest event of each KEEP_LATEST type, replayed when a page connects
 
     def publish(self, event: dict):
         if self.loop is None:
@@ -88,38 +117,37 @@ class Hub:
             self.loop.call_soon_threadsafe(self._deliver, event)
 
     def _deliver(self, event: dict):   # runs on the event loop
-        kind = event["type"]
-        if kind == "message":
-            self.chat.append(event)
-        elif kind == "clear":
-            self.chat.clear()
-        elif kind in self.KEEP_LATEST:
-            self.latest[kind] = event
+        if event["type"] in self.KEEP_LATEST:
+            self.latest[event["type"]] = event
         for queue in list(self.queues):
-            if kind == "level" and queue.qsize() > 20:
+            if event["type"] == "level" and queue.qsize() > 20:
                 continue   # a busy page can skip a few animation frames
             queue.put_nowait(event)
-
-    def snapshot(self) -> list:
-        return list(self.latest.values()) + list(self.chat)
 
 
 # ---------- Jarvis himself ----------
 
 class Jarvis:
-    """One Brain shared by the voice loop and the chat box, plus everything the dashboard shows."""
+    """The chats, the voice loop and everything the dashboard shows."""
 
-    def __init__(self, hub: Hub, settings: dict, voice_enabled: bool, quit_with_window: bool):
+    def __init__(self, hub: Hub, settings: dict, voice_enabled: bool, quit_with_window: bool, store: ChatStore = None):
         self.hub = hub
         self.settings = settings
         self.voice_enabled = voice_enabled
         self.quit_with_window = quit_with_window
         self.server = None
 
-        self.brain = Brain()
-        self.brain.on_event = lambda event: hub.publish({"type": "activity", "tool": event.get("name")})
-        self.brain_lock = threading.Lock()     # one request to Claude at a time
-        self.speech_lock = threading.Lock()    # one voice at a time
+        self.store = store or ChatStore(default_model=settings["new_chat_model"])
+        self.brains = {}                        # chat id -> Brain, loaded from the store when first needed
+        self.client = Brain().client            # one API client shared by every chat
+        self.active_chat = None                 # the chat open in the dashboard; voice goes here too
+        self.brain_lock = threading.Lock()      # one reply at a time
+        self.speech_lock = threading.Lock()     # one voice at a time
+        self.stop_reply = threading.Event()     # the Stop button
+        self.approvals = {}                     # approval id -> pending request
+        self.voice_turn = False                 # the reply in progress was asked by voice
+        self.generating_chat = None             # the chat a reply is being written for
+        self.stream = None                      # the reply being written, replayed to a page that opens mid-reply
 
         self.voice_state = "asleep" if voice_enabled else "voice-off"
         self.detail = ""
@@ -140,9 +168,14 @@ class Jarvis:
         self.conversations = 0
         self._last_level = 0.0
 
+        tools.APPROVER = self.request_approval
+        tools.CHAT_SEARCH = self.store.search
+
     # --- starting and stopping ---
 
     def start(self):
+        chats = self.store.list_chats()
+        self.active_chat = chats[0]["id"] if chats else self.store.create_chat(model=self.settings["new_chat_model"])["id"]
         for job in (self._stats_feed, self._weather_feed, self._spotify_feed, self._typed_worker):
             threading.Thread(target=job, daemon=True, name=job.__name__).start()
         if self.voice_enabled:
@@ -154,7 +187,7 @@ class Jarvis:
     def stop(self):
         self.shutdown.set()
         self.typed.put(None)
-        self.stop_speaking()
+        self.stop_everything()
 
     def page_opened(self):
         self.pages += 1
@@ -169,12 +202,32 @@ class Jarvis:
             print("Dashboard closed, so Jarvis is shutting down.")
             self.server.should_exit = True
 
+    def snapshot(self) -> list:
+        """Everything a page needs when it connects or reloads."""
+        events = list(self.hub.latest.values())
+        events.append({"type": "models", "models": MODELS})
+        events.append(self._chats_event())
+        events.append(self._chat_open_event(self.active_chat))
+        events.append({"type": "memory", "facts": memory.facts()})
+        stream = self.stream   # a reply already being written: the page picks it up where it is
+        if stream:
+            events.append({"type": "message_start", "chat_id": stream["chat_id"], "id": stream["id"], "model": stream["model"]})
+            if stream["text"] or stream["thinking"]:
+                events.append({"type": "delta", "chat_id": stream["chat_id"], "id": stream["id"],
+                               "text": stream["text"], "thinking": stream["thinking"]})
+        for approval in self.approvals.values():
+            events.append(self._approval_event(approval))
+        return events
+
     # --- what the orb and status line show ---
 
     def _publish_state(self):
-        state = "thinking" if self.thinking else "speaking" if self.speaking else self.voice_state
-        self.hub.publish({"type": "state", "state": state, "mic_on": self.mic_on,
-                          "voice": self.voice_enabled, "detail": self.detail})
+        if self.approvals:
+            state = "approval"
+        else:
+            state = "thinking" if self.thinking else "speaking" if self.speaking else self.voice_state
+        self.hub.publish({"type": "state", "state": state, "mic_on": self.mic_on, "voice": self.voice_enabled,
+                          "detail": self.detail, "generating": self.thinking > 0})
 
     def _set_voice_state(self, state: str, detail: str = ""):
         self.voice_state, self.detail = state, detail
@@ -191,52 +244,390 @@ class Jarvis:
         self._last_level = now
         self.hub.publish({"type": "level", "value": round(min(1.0, raw * LEVEL_GAIN[source]), 3)})
 
+    # --- chats ---
+
+    def _brain(self, chat_id: str) -> Brain:
+        brain = self.brains.get(chat_id)
+        if brain is None:
+            brain = Brain(messages=self.store.history(chat_id))
+            brain.client, brain.chat_id, brain.stop = self.client, chat_id, self.stop_reply
+            self.brains[chat_id] = brain
+        return brain
+
+    def _chats_event(self) -> dict:
+        return {"type": "chats", "chats": self.store.list_chats(), "active": self.active_chat}
+
+    def _chat_open_event(self, chat_id) -> dict:
+        return {"type": "chat_open", "chat": self.store.get_chat(chat_id), "messages": self.store.messages(chat_id)}
+
+    def open_chat(self, chat_id: str):
+        if self.store.get_chat(chat_id):
+            self.active_chat = chat_id
+            self.hub.publish(self._chat_open_event(chat_id))
+            self.hub.publish(self._chats_event())
+
+    def new_chat(self):
+        """Start a fresh chat, unless the open one is still empty."""
+        current = self.store.get_chat(self.active_chat) if self.active_chat else None
+        if current and not self.store.messages(current["id"]):
+            self.store.update_chat(current["id"], model=self.settings["new_chat_model"], think=False)
+            chat_id = current["id"]
+        else:
+            chat_id = self.store.create_chat(model=self.settings["new_chat_model"])["id"]
+        self.open_chat(chat_id)
+
+    def rename_chat(self, chat_id: str, title: str):
+        title = " ".join(str(title).split())[:80]
+        if title:
+            self.store.update_chat(chat_id, title=title)
+            self.hub.publish(self._chats_event())
+
+    def pin_chat(self, chat_id: str, pinned: bool):
+        self.store.update_chat(chat_id, pinned=bool(pinned))
+        self.hub.publish(self._chats_event())
+
+    def chat_settings(self, chat_id: str, model=None, think=None):
+        changes = {}
+        if model in MODEL_IDS:
+            changes["model"] = model
+        if isinstance(think, bool):
+            changes["think"] = think
+        if changes and self.store.get_chat(chat_id):
+            chat = self.store.update_chat(chat_id, **changes)
+            self.hub.publish({"type": "chat_updated", "chat": chat})
+            self.hub.publish(self._chats_event())
+
+    def delete_chat(self, chat_id: str):
+        if self.generating_chat == chat_id:
+            self.stop_everything()
+        with self.brain_lock:
+            self.store.delete_chat(chat_id)
+            self.brains.pop(chat_id, None)
+        if chat_id == self.active_chat:
+            remaining = self.store.list_chats()
+            self.active_chat = remaining[0]["id"] if remaining else self.store.create_chat(model=self.settings["new_chat_model"])["id"]
+            self.hub.publish(self._chat_open_event(self.active_chat))
+        self.hub.publish(self._chats_event())
+
+    def search_chats(self, query: str):
+        results = self.store.search_chats(query) if str(query).strip() else self.store.list_chats()
+        self.hub.publish({"type": "chat_search", "query": query, "results": results})
+
     # --- talking to Claude ---
 
-    def _chat(self, role: str, text: str, **extra):
-        self.hub.publish({"type": "message", "id": uuid.uuid4().hex, "role": role, "text": text,
-                          "time": time.time(), **extra})
+    def _attachments(self, raw_items, chat_id):
+        """Uploaded files -> (what Claude gets, what the chat shows, where they were saved)."""
+        for_claude, shown, saved = [], [], []
+        folder = tools.WORKSPACE / "uploads" / chat_id
+        for item in (raw_items or [])[:10]:
+            try:
+                name = Path(str(item.get("name") or "file")).name[:120] or "file"
+                data = base64.b64decode(item.get("data") or "", validate=True)
+            except (ValueError, TypeError, AttributeError):
+                continue
+            if not data or len(data) > MAX_ATTACHMENT:
+                continue
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / name
+            path.write_bytes(data)   # saved, so Jarvis can also work on the file with his tools
+            saved.append(str(path))
+            mime = str(item.get("type") or "")
+            if mime.startswith("image/") and not mime.endswith("svg+xml"):
+                try:
+                    from PIL import Image
+                    with Image.open(io.BytesIO(data)) as picture:
+                        picture = picture.convert("RGB")
+                        big, small = tools._shrink(picture, tools.SHOT_MAX_SIDE, tools.SHOT_MAX_PIXELS), tools._shrink(picture, 480)
+                        for_claude.append({"kind": "image", "name": name, "media_type": "image/jpeg", "data": tools._jpeg_base64(big, 88)})
+                        shown.append({"name": name, "kind": "image", "image": "data:image/jpeg;base64," + tools._jpeg_base64(small, 80)})
+                except Exception:
+                    shown.append({"name": name, "kind": "file", "size": len(data)})
+            elif mime == "application/pdf" or name.lower().endswith(".pdf"):
+                for_claude.append({"kind": "pdf", "name": name, "data": base64.b64encode(data).decode("ascii")})
+                shown.append({"name": name, "kind": "pdf", "size": len(data)})
+            else:
+                if b"\x00" in data[:8000]:
+                    shown.append({"name": name, "kind": "file", "size": len(data)})
+                    continue   # not text: Claude can still reach it through the saved copy
+                text = data.decode("utf-8", errors="replace")
+                if len(text) > 400_000:
+                    text = text[:400_000] + "\n… (cut: the file is too long to attach whole; use read_file on the saved copy)"
+                for_claude.append({"kind": "text", "name": name, "text": text})
+                shown.append({"name": name, "kind": "text", "size": len(data)})
+        return for_claude, shown, saved
 
-    def ask(self, text: str, source: str) -> str:
-        """Send one request to Claude and post both sides to the chat. Returns what Jarvis would say."""
-        self._chat("user", text, source=source)
+    def ask(self, text: str, source: str, chat_id: str = None, attachments=None, reuse=None) -> str:
+        """Send one message to Claude in a chat, streaming the reply to the page. Returns what Jarvis would say.
+        reuse: attachments already in Claude's format (retry and edit pass the originals back in)."""
+        chat_id = chat_id or self.active_chat
+        chat = self.store.get_chat(chat_id)
+        if chat is None:
+            return ""
+        brain = self._brain(chat_id)
+        for_claude, shown, saved = self._attachments(attachments, chat_id)
+        for_claude = reuse["for_claude"] if reuse else for_claude
+        shown = reuse["shown"] if reuse else shown
+        saved = reuse["saved"] if reuse else saved
+        prompt = text
+        if saved:
+            prompt = (text or "Take a look at the attached file.") + "\n\n(The attachments are also saved at: " + "; ".join(saved) + ")"
+
+        user_message = {"id": uuid.uuid4().hex, "chat_id": chat_id, "role": "user", "text": text, "source": source,
+                        "time": time.time(), "attachments": shown, "saved": saved, "history_index": len(brain.messages)}
+        self.store.add_message(chat_id, user_message)
+        self.hub.publish({"type": "message", **user_message})
         self.commands += 1
         self._publish_counters()
+
+        reply_id = uuid.uuid4().hex
+        model = config.BRAIN_MODEL if source == "voice" else chat["model"]
         error = None
         with self.brain_lock:
+            self.stop_reply.clear()
             self.thinking += 1
+            self.voice_turn = source == "voice"
+            self.generating_chat = chat_id
+            self.stream = {"chat_id": chat_id, "id": reply_id, "model": model, "text": "", "thinking": ""}
             self._publish_state()
+            self.hub.publish({"type": "message_start", "chat_id": chat_id, "id": reply_id, "model": model})
+            brain.on_event = lambda event: self._brain_event(chat_id, reply_id, event)
             try:
-                reply = self.brain.think(text)
-                links, shots, used = self.brain.last_links, self.brain.last_screenshots, self.brain.last_tools
-            except Exception as e:   # API hiccup, no internet, etc.
+                reply = brain.think(prompt, attachments=for_claude, model=model, stream=True,
+                                    think_harder=chat["think"] and source != "voice", spoken=source == "voice")
+            except Exception as e:   # API hiccup, no internet, bad key...
                 print(f"⚠️ {e}")
-                reply, links, shots, used, error = "Something went wrong on my end, sir.", [], [], [], str(e)[:300]
+                error = str(e)[:500]
+                reply = "Something went wrong on my end, sir."
+                brain._strip_turn_thinking()
+                if brain.messages and brain.messages[-1]["role"] == "user":   # keep the history valid for next time
+                    brain.messages.append({"role": "assistant", "content": f"(That reply failed: {error})"})
+                brain.last_text = reply
             finally:
                 self.thinking -= 1
-        said = for_speech(reply) or ("It's in the chat, sir." if links or shots else "Done, sir.")
-        self._chat("jarvis", said, source=source, links=links, screenshots=shots,
-                   tools=list(dict.fromkeys(used)), error=error)
+                self.voice_turn = False
+                self.generating_chat = None
+                self.stream = None
+            self.store.save_history(chat_id, brain.messages)
+            said = self._what_to_say(brain, reply)
+            reply_message = {
+                "id": reply_id, "chat_id": chat_id, "role": "jarvis", "source": source, "time": time.time(),
+                "text": brain.last_text or reply,   # always the full written reply; `spoken` is what was read out
+                "spoken": said if source == "voice" or self.settings["speak_typed"] else "",
+                "links": brain.last_links, "screenshots": brain.last_screenshots, "visuals": brain.last_visuals,
+                "files": brain.last_files, "tools": list(dict.fromkeys(brain.last_tools)), "thinking": brain.last_thinking,
+                "model": model, "error": error, "stopped": brain.stopped,
+            }
+            self.store.add_message(chat_id, reply_message)
+        self.hub.publish({"type": "message", **reply_message})
         self._publish_state()
+        if {"remember", "forget"} & set(brain.last_tools):
+            self.hub.publish({"type": "memory", "facts": memory.facts()})
+        if chat["title"] == "New chat" and not error:
+            self._title_later(chat_id, text or "(attachment)", brain.last_text)
+        else:
+            self.hub.publish(self._chats_event())
         return said
 
+    def _what_to_say(self, brain: Brain, reply: str) -> str:
+        """What actually gets read aloud. A real answer — long, or full of code, maths, steps or a table —
+        stays in the chat window to be read, and Jarvis says one line instead. Nikhil asked for this
+        (Sept 12) after telling Jarvis five times in memory and getting nowhere: the old code spoke
+        every reply no matter what, so no instruction could have worked."""
+        if brain.last_spoken:                                   # Claude called answer_in_chat itself
+            return brain.last_spoken
+        if self.settings["quiet_answers"] and belongs_on_screen(reply):
+            return random.choice(IN_THE_CHAT)
+        return for_speech(reply) or ("It's in the chat, sir." if brain.last_text else "Done, sir.")
+
+    def _brain_event(self, chat_id: str, reply_id: str, event: dict):
+        kind = event.get("type")
+        base = {"chat_id": chat_id, "id": reply_id}
+        stream = self.stream
+        if stream and stream["id"] == reply_id:   # kept so a page opened mid-reply can catch up
+            if kind == "text":
+                stream["text"] += event["delta"]
+            elif kind == "thinking":
+                stream["thinking"] += event["delta"]
+            elif kind == "round":
+                stream["text"] += "\n\n"
+        if kind == "text":
+            self.hub.publish({"type": "delta", **base, "text": event["delta"]})
+        elif kind == "thinking":
+            self.hub.publish({"type": "delta", **base, "thinking": event["delta"]})
+        elif kind == "round":
+            self.hub.publish({"type": "delta", **base, "text": "\n\n"})
+        elif kind in ("tool", "tool_start"):
+            self.hub.publish({"type": "activity", **base, "tool": event["name"]})
+        elif kind == "tool_done":
+            self.hub.publish({"type": "activity", **base, "tool": event["name"], "done": True, "summary": event.get("summary", "")})
+
+    def _title_later(self, chat_id: str, user_text: str, reply_text: str):
+        def work():
+            try:
+                title = self._brain(chat_id).make_title(user_text, reply_text)
+            except Exception:
+                title = " ".join(user_text.split()[:6])[:60] or "New chat"
+            self.store.update_chat(chat_id, title=title)
+            self.hub.publish(self._chats_event())
+        threading.Thread(target=work, daemon=True).start()
+
     def _typed_worker(self):
-        """Handles typed messages one at a time, so the page never waits on Claude."""
+        """Handles typed messages (and retries and edits) one at a time, so the page never waits on Claude."""
         while True:
-            text = self.typed.get()
-            if text is None:
+            job = self.typed.get()
+            if job is None:
                 return
             try:
-                said = self.ask(text, "typed")
-                if self.settings["speak_typed"]:
+                said = self.ask(**job)
+                if self.settings["speak_typed"] and said:
                     self.speak(said)
             except Exception as e:
                 print(f"⚠️ {e}")
 
-    def clear_conversation(self):
+    def rerun(self, chat_id: str, message_id: str = None, new_text: str = None):
+        """Retry the last reply, or edit one of your messages and continue from there."""
+        messages = self.store.messages(chat_id)
+        users = [m for m in messages if m["role"] == "user"]
+        target = next((m for m in users if m["id"] == message_id), None) if message_id else (users[-1] if users else None)
+        if target is None or self.thinking:
+            return
+        brain = self._brain(chat_id)
         with self.brain_lock:
-            self.brain.messages.clear()   # Jarvis forgets this conversation (memory.json facts stay)
-        self.hub.publish({"type": "clear"})
+            index = self._history_index(brain.messages, target)
+            original = brain.messages[index]["content"] if index < len(brain.messages) else target["text"]
+            reuse = {"for_claude": self._attachments_back(original), "shown": target.get("attachments") or [],
+                     "saved": target.get("saved") or []}
+            del brain.messages[index:]
+            self.store.save_history(chat_id, brain.messages)
+            self.store.delete_messages_from(chat_id, target["id"])
+        self.hub.publish(self._chat_open_event(chat_id))
+        text = target["text"] if new_text is None else str(new_text)
+        self.typed.put({"text": text, "source": "typed", "chat_id": chat_id, "reuse": reuse})
+
+    @staticmethod
+    def _history_index(history: list, target: dict) -> int:
+        """Where a chat-window message starts in Claude's history. Usually its saved position, but a very long
+        chat may have had old messages trimmed since, so check and fall back to searching by text."""
+        def opens_with(message):
+            content = message["content"]
+            text = content if isinstance(content, str) else " ".join(b.get("text", "") for b in content if b.get("type") == "text")
+            fresh = isinstance(content, str) or not any(b.get("type") == "tool_result" for b in content)
+            return message["role"] == "user" and fresh and text.startswith(target["text"] or "")
+        index = int(target.get("history_index", len(history)))
+        if index < len(history) and opens_with(history[index]):
+            return index
+        for index in range(len(history) - 1, -1, -1):
+            if opens_with(history[index]):
+                return index
+        return len(history)
+
+    @staticmethod
+    def _attachments_back(content) -> list:
+        """Claude-format user content -> the attachment list think() takes (for retry and edit)."""
+        found = []
+        for block in content if isinstance(content, list) else []:
+            if block.get("type") == "image":
+                found.append({"kind": "image", "name": "image", "media_type": block["source"]["media_type"], "data": block["source"]["data"]})
+            elif block.get("type") == "document" and block.get("source", {}).get("type") == "base64":
+                found.append({"kind": "pdf", "name": block.get("title") or "document.pdf", "data": block["source"]["data"]})
+            elif block.get("type") == "document":
+                found.append({"kind": "text", "name": block.get("title") or "file.txt", "text": block["source"].get("data", "")})
+        return found
+
+    def stop_everything(self):
+        """The Stop button: end the reply being written, any running command, pending approvals, and speech."""
+        self.stop_reply.set()
+        tools.stop_running()
+        for approval in list(self.approvals.values()):
+            approval["decision"] = approval["decision"] or "deny"
+            approval["event"].set()
+        self.stop_speaking()
+
+    # --- approvals (tools.APPROVER) ---
+
+    @staticmethod
+    def _approval_event(approval: dict) -> dict:
+        return {"type": "approval", **{key: value for key, value in approval.items() if key != "event"}}
+
+    def request_approval(self, kind: str, title: str, detail: str, chat_id) -> str:
+        """Called by a tool on the reply's thread: show an approval card (and ask out loud during a voice turn),
+        then wait for a decision. Returns "once", "chat" or "deny"."""
+        if self.shutdown.is_set() or self.stop_reply.is_set():
+            return "deny"
+        approval = {"id": uuid.uuid4().hex[:12], "kind": kind, "title": title, "detail": detail, "chat_id": chat_id,
+                    "time": time.time(), "decision": None, "via": None, "event": threading.Event()}
+        self.approvals[approval["id"]] = approval
+        self.hub.publish(self._approval_event(approval))
+        self._publish_state()
+        try:
+            if self.voice_turn and self.voice_enabled and self.mic_on:
+                self._approval_by_voice(approval)
+            deadline = time.monotonic() + APPROVAL_TIMEOUT
+            while not approval["event"].wait(0.2):
+                if self.shutdown.is_set() or self.stop_reply.is_set() or time.monotonic() > deadline:
+                    break
+        finally:
+            self.approvals.pop(approval["id"], None)
+        decision = approval["decision"] or "deny"
+        self.hub.publish({"type": "approval_done", "id": approval["id"], "chat_id": chat_id, "decision": decision,
+                          "via": approval["via"]})
+        self._publish_state()
+        return decision
+
+    def decide(self, approval_id: str, decision: str):
+        """The page's approval buttons."""
+        approval = self.approvals.get(approval_id)
+        if approval and approval["decision"] is None and decision in ("once", "chat", "deny"):
+            approval["decision"], approval["via"] = decision, "click"
+            approval["event"].set()
+
+    def _approval_by_voice(self, approval: dict):
+        """During a voice turn: say what needs approving and listen for yes or no (a click still works too)."""
+        import jarvis as cli
+        from voice import listen
+        what = "run that" if approval["kind"] == "command" else "use that folder"
+        self.speak(f"May I {what}, sir? It's on screen. Yes or no.")
+        waiting = lambda: approval["event"].is_set() or self.stop_reply.is_set() or self.shutdown.is_set()
+        for _ in range(4):
+            if waiting():
+                return
+            clean = cli.normalize(listen(should_stop=waiting))
+            if clean in YES_WORDS:
+                decision = "chat" if approval["kind"] == "folder" else "once"
+            elif clean in NO_WORDS:
+                decision = "deny"
+            else:
+                if clean and not waiting():
+                    self.speak("Yes or no, sir?")
+                continue
+            if approval["decision"] is None:
+                approval["decision"], approval["via"] = decision, "voice"
+                approval["event"].set()
+            return
+
+    # --- memory ---
+
+    def add_memory(self, fact: str):
+        if str(fact).strip():
+            memory.remember(str(fact)[:500])
+        self.hub.publish({"type": "memory", "facts": memory.facts()})
+
+    def delete_memory(self, index):
+        if isinstance(index, int):
+            memory.delete_fact(index)
+        self.hub.publish({"type": "memory", "facts": memory.facts()})
+
+    # --- files Jarvis made or showed ---
+
+    @staticmethod
+    def open_file(path_text: str, reveal: bool):
+        path = Path(str(path_text))
+        if not path.is_absolute() or not path.exists() or sys.platform != "win32":
+            return
+        if reveal or path.is_dir() or path.suffix.lower() in tools.RUNS_WHEN_OPENED:
+            subprocess.Popen(["explorer.exe", "/select,", str(path)])   # programs and scripts are shown, never run
+        else:
+            os.startfile(path)
 
     # --- voice ---
 
@@ -414,11 +805,13 @@ class Jarvis:
     def update_settings(self, values: dict):
         weather_changed = False
         for key, value in values.items():
-            if key in ("speak_typed", "show_tools") and isinstance(value, bool):
+            if key in ("speak_typed", "quiet_answers", "show_tools") and isinstance(value, bool):
                 pass
             elif key == "weather_city" and isinstance(value, str) and value.strip():
                 value = value.strip()[:80]
             elif key == "units" and value in ("imperial", "metric"):
+                pass
+            elif key == "new_chat_model" and value in MODEL_IDS:
                 pass
             else:
                 continue
@@ -459,7 +852,7 @@ def create_app(jarvis: Jarvis, hub: Hub, port: int) -> FastAPI:
             return
         await ws.accept()
         queue = asyncio.Queue()
-        for event in hub.snapshot():
+        for event in await asyncio.to_thread(jarvis.snapshot):
             queue.put_nowait(event)
         hub.queues.add(queue)
         jarvis.page_opened()
@@ -489,21 +882,47 @@ def create_app(jarvis: Jarvis, hub: Hub, port: int) -> FastAPI:
 
 async def handle_command(jarvis: Jarvis, command: dict):
     kind = command.get("type")
-    run_in_thread = asyncio.to_thread   # anything slow runs off the event loop so the page stays responsive
+    chat_id = str(command.get("chat_id") or "") or jarvis.active_chat
+    in_thread = asyncio.to_thread   # anything slow runs off the event loop so the page stays responsive
     if kind == "send":
-        text = str(command.get("text", "")).strip()[:4000]
-        if text:
-            jarvis.typed.put(text)
+        text = str(command.get("text", "")).strip()[:100_000]
+        attachments = command.get("attachments") if isinstance(command.get("attachments"), list) else []
+        if text or attachments:
+            jarvis.typed.put({"text": text, "source": "typed", "chat_id": chat_id, "attachments": attachments})
+    elif kind == "stop":
+        jarvis.stop_everything()
+    elif kind == "approve":
+        jarvis.decide(str(command.get("id")), str(command.get("decision")))
     elif kind == "talk":
         jarvis.talk_button()
     elif kind == "mic":
         jarvis.set_mic(bool(command.get("on")))
-    elif kind == "stop":
-        jarvis.stop_speaking()
-    elif kind == "clear":
-        await run_in_thread(jarvis.clear_conversation)
+    elif kind == "chat_new":
+        await in_thread(jarvis.new_chat)
+    elif kind == "chat_open":
+        await in_thread(jarvis.open_chat, chat_id)
+    elif kind == "chat_rename":
+        await in_thread(jarvis.rename_chat, chat_id, command.get("title", ""))
+    elif kind == "chat_pin":
+        await in_thread(jarvis.pin_chat, chat_id, bool(command.get("pinned")))
+    elif kind == "chat_delete":
+        await in_thread(jarvis.delete_chat, chat_id)
+    elif kind == "chat_settings":
+        await in_thread(jarvis.chat_settings, chat_id, command.get("model"), command.get("think"))
+    elif kind == "chat_search":
+        await in_thread(jarvis.search_chats, str(command.get("query", ""))[:200])
+    elif kind == "retry":
+        await in_thread(jarvis.rerun, chat_id)
+    elif kind == "edit":
+        await in_thread(jarvis.rerun, chat_id, str(command.get("message_id")), str(command.get("text", ""))[:100_000])
+    elif kind == "memory_add":
+        await in_thread(jarvis.add_memory, command.get("fact", ""))
+    elif kind == "memory_delete":
+        await in_thread(jarvis.delete_memory, command.get("index"))
+    elif kind == "open_file":
+        await in_thread(jarvis.open_file, command.get("path", ""), bool(command.get("reveal")))
     elif kind == "settings" and isinstance(command.get("values"), dict):
-        await run_in_thread(jarvis.update_settings, command["values"])
+        await in_thread(jarvis.update_settings, command["values"])
     elif kind == "spotify":
         threading.Thread(target=jarvis.spotify_button, args=(str(command.get("action")),), daemon=True).start()
     elif kind == "refresh" and command.get("what") in jarvis.refresh:
@@ -547,12 +966,13 @@ def main():
     args = parser.parse_args()
 
     tools.CHAT_WINDOW = True
+    tools.WORKSPACE.mkdir(exist_ok=True)
     port = free_port(args.port)
     url = f"http://127.0.0.1:{port}/"
     hub = Hub()
     jarvis = Jarvis(hub, load_settings(), voice_enabled=not args.no_voice, quit_with_window=not args.no_window)
     server = uvicorn.Server(uvicorn.Config(create_app(jarvis, hub, port), host="127.0.0.1", port=port,
-                                           log_level="warning"))
+                                           log_level="warning", ws_max_size=64 * 1024 * 1024))
     jarvis.server = server
     if not args.no_window:
         threading.Thread(target=open_window, args=(server, url, args.browser), daemon=True).start()

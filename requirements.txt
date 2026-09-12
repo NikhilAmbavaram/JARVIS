@@ -1,0 +1,23 @@
+# Jarvis — Python 3.13 on Windows
+#   python -m venv venv
+#   .\venv\Scripts\activate
+#   pip install -r requirements.txt
+
+anthropic==1.5.0          # Claude: the brain, tool use, web search and fetch
+openai==3.13.0            # speech to text (gpt-transcribe) and text to speech (gpt-4o-mini-tts)
+python-dotenv==1.2.3      # reads .env
+
+openwakeword==0.6.0       # the "Hey Jarvis" wake word, running locally and offline
+sounddevice==0.5.6        # microphone in, speaker out
+soundfile==0.14.0         # WAV encoding and decoding around the speech APIs
+numpy==2.5.3              # audio buffers
+
+fastapi==0.141.1          # the dashboard's web server, bound to 127.0.0.1
+uvicorn==0.52.4           # runs it
+websockets==17.1          # the dashboard's live connection
+
+psutil==7.2.2             # CPU, memory and disk for the stats panel
+pillow==12.3.0            # screenshots, thumbnails, the window icon
+requests==2.34.2          # weather, from Open-Meteo
+rapidfuzz==3.14.6         # matching rough names of files, apps and repos
+spotipy==2.26.0           # Spotify playback control (optional)
