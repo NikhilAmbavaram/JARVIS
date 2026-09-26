@@ -4,11 +4,27 @@ import numpy as np
 import sounddevice as sd
 from openwakeword.model import Model
 
+import config
+
 SAMPLE_RATE = 16000
 CHUNK = 1280          # openWakeWord expects 80ms frames (1280 samples @ 16kHz)
 THRESHOLD = 0.5       # 0-1 confidence; raise if it triggers too easily
 
 _model = None         # loaded the first time, then reused, so dozing off doesn't reload it every time
+
+def _load_model() -> Model:
+    """Load the pretrained wake-word model, downloading it on the first run."""
+    try:
+        return Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
+    except Exception:
+        print("Fetching the wake-word models (first run only)...")
+        from openwakeword.utils import download_models
+        try:
+            download_models(["hey_jarvis"])
+        except TypeError:          # older signature takes no arguments
+            download_models()
+        return Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
+
 
 def wait_for_wake_word(should_stop=None, on_level=None) -> bool:
     """Block until the user says 'Hey Jarvis'. Runs fully locally & free.
@@ -17,13 +33,13 @@ def wait_for_wake_word(should_stop=None, on_level=None) -> bool:
     global _model
     if _model is None:
         # "hey_jarvis" is a built-in pretrained model — perfect for us.
-        _model = Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
+        _model = _load_model()
     else:
         _model.reset()  # forget last time's audio, or the old "Hey Jarvis" could wake him straight back up
     print("Offline")
 
     with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16",
-                        blocksize=CHUNK, device=6) as stream:
+                        blocksize=CHUNK, device=config.MIC_DEVICE) as stream:
         while True:
             if should_stop and should_stop():
                 return False

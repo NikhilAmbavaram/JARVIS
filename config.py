@@ -7,6 +7,13 @@ load_dotenv()  # reads .env into environment variables
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 OPENAI_API_KEY    = os.environ["OPENAI_API_KEY"]
 
+# Microphone for the wake word and listening.
+#   MIC_DEVICE=6              -> device number from `python list_audio.py`
+#   MIC_DEVICE=Blue Yeti      -> any part of the device's name
+#   MIC_DEVICE=               -> Windows' default input device
+_mic = os.getenv("MIC_DEVICE", "").strip()
+MIC_DEVICE = int(_mic) if _mic.lstrip("-").isdigit() else (_mic or None)
+
 BRAIN_MODEL = "claude-haiku-4-5"
 #       cheaper: "claude-haiku-4-5"   smartest: "claude-opus-5"
 CHAT_MODEL = "claude-opus-5"     # typed chats in the dashboard start on this; voice always uses BRAIN_MODEL

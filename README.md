@@ -1,14 +1,37 @@
 # J.A.R.V.I.S
 
-A voice assistant for Windows with a dry butler streak. Say **"Hey Jarvis"**, talk normally, and it answers
-out loud — or, when the answer is something to read rather than hear, writes it into a dashboard that does
-what a desktop AI chat app does: saved conversations, streaming Markdown, syntax-highlighted code, maths,
-diagrams, file edits and shell commands on the machine it's running on.
+**A voice assistant for Windows with a dry butler streak — and real reach into the machine it runs on.**
 
-Python 3.13 · Windows · Claude API · no build step, no framework, no CDN
+Say **"Hey Jarvis"**, talk normally, and it answers out loud. When the answer is something to read rather
+than hear — code, maths, a long explanation — it writes it into a dashboard that does what a desktop AI chat
+app does: saved conversations, streaming Markdown, syntax-highlighted code, diagrams, file edits, and shell
+commands on your own PC, each one behind an approval prompt.
 
-<!-- Drop a screenshot in here: Win+Shift+S, save as docs/dashboard.png
-![The dashboard](docs/dashboard.png) -->
+![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
+![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D4?logo=windows&logoColor=white)
+![Claude API](https://img.shields.io/badge/Claude_API-tool_use-D97757)
+![openWakeWord](https://img.shields.io/badge/wake_word-local_%26_offline-4C9A6B)
+![FastAPI](https://img.shields.io/badge/FastAPI-WebSocket-009688?logo=fastapi&logoColor=white)
+
+Python 3.13 · Claude API with tool use · OpenAI speech · FastAPI + WebSocket · SQLite (FTS5) · openWakeWord
+· ~4,100 lines of Python and a front end with no build step, no framework and no CDN.
+
+---
+
+## Demo
+
+<!--
+  DEMO VIDEO — drag the .mp4 straight into GitHub's web editor for this file
+  (github.com/NikhilAmbavaram/JARVIS → README.md → pencil icon → drop the file in).
+  GitHub uploads it and pastes a player link right here. Keep it to 60–90 seconds:
+  wake word → a spoken question → a tool doing something real (git status or a screenshot)
+  → an approval prompt → a long answer landing in the chat window.
+
+  SCREENSHOT — Win+Shift+S, save as docs/dashboard.png, then uncomment:
+![The dashboard](docs/dashboard.png)
+-->
+
+*Demo video coming — drop it in the block above.*
 
 ---
 
@@ -60,9 +83,33 @@ flowchart LR
   D -->|code, maths, long| P[written into the chat window]
 ```
 
-The last step is the one worth explaining: speech is slow and you can't skim it, so anything long or full of
+## Decisions worth explaining
+
+**Speech and screen are different media.** Speech is slow and you can't skim it, so anything long or full of
 code, maths, steps or tables is written into the chat in full, and only a line like *"It's in the chat, sir."*
-is read aloud. Quick facts are still just spoken.
+is read aloud. Quick facts are still just spoken. `belongs_on_screen()` and `for_speech()` in `brain.py` make
+that call on every reply, and the model gets a different system prompt depending on whether you spoke or typed.
+
+**Permission lives in the tool layer, not the prompt.** A model can be talked into anything, so nothing
+dangerous depends on it behaving. `tools.py` refuses secret files outright, asks before the first touch of any
+folder, and routes every command and script through an approval the user answers by click or by voice. An
+allow is scoped to one chat, so a yes from last week can't authorise today's command.
+
+**The conversation is budgeted, not unbounded.** Every turn re-sends the whole chat, so `brain.py` trims old
+messages to a token budget, drops screenshots after they've served their purpose, strips previous turns'
+thinking blocks, and leans on prompt caching — which is what keeps a long typed conversation from costing
+several dollars a turn.
+
+**Stop means stop.** A `Stopped` exception unwinds the streaming loop, kills the running command and its
+children, and still saves the partial reply, instead of leaving an orphaned PowerShell process behind.
+
+**Chats are a database, not a JSON blob.** SQLite with an FTS5 virtual table gives full-text search across
+every message, per-chat model selection, and message-level edit-and-continue, without loading anything into
+memory that isn't on screen.
+
+**The front end is plain HTML, CSS and JS.** No build step and no CDN: marked, DOMPurify, highlight.js,
+KaTeX, Chart.js and Mermaid are vendored in `ui/vendor/`, so the chat renders fully with no internet and
+nothing to `npm install` before it runs.
 
 ## Setup
 
@@ -72,7 +119,6 @@ cd JARVIS
 python -m venv venv
 .\venv\Scripts\activate
 pip install -r requirements.txt
-python list_audio.py            # downloads the wake-word models, once
 ```
 
 Create a `.env` next to the code (see `.env.example`):
@@ -83,9 +129,16 @@ OPENAI_API_KEY=sk-...
 SPOTIFY_CLIENT_ID=...           # optional
 ```
 
-**Pick your microphone.** The input device number is hard-coded in `voice.py` and `wake.py` as `device=6`.
-List yours with `python -m sounddevice` and set both to the right number, or the wake word will sit there
-hearing silence.
+**Pick your microphone.**
+
+```powershell
+python list_audio.py            # lists your input devices
+python list_audio.py --test     # records 2s from the one .env selects and shows the level
+```
+
+Set `MIC_DEVICE` in `.env` to the number you want, or to part of the device's name
+(`MIC_DEVICE=Blue Yeti`). Leave it blank for the Windows default. If the wake word never triggers, this is
+almost always why. The wake-word models download themselves the first time you run it.
 
 ## Running it
 
@@ -117,13 +170,13 @@ playback buttons fall back to the keyboard's media keys.
 | `memory.py` | Facts it keeps between sessions, shared by every chat |
 | `voice.py`, `wake.py` | Microphone, speakers, wake word |
 | `dashboard.py` | System stats and weather |
-| `config.py` | Keys, model choice, and the personality prompt |
+| `config.py` | Keys, microphone, model choice, and the personality prompt |
 | `ui/` | The page: plain HTML, CSS and JS, no build step |
 | `ui/vendor/` | marked, DOMPurify, highlight.js, KaTeX, Chart.js, Mermaid — vendored so the chat renders with no internet |
 
 ## Cost
 
-Voice answers on Haiku 4.5 for speed, typed chats start on Opus 5 and can be switched per chat. A spoken
+Voice answers run on Haiku 4.5 for speed; typed chats start on Opus 5 and can be switched per chat. A spoken
 question runs about a cent; a typed one on Opus is nearer five, more if the conversation is long, since the
 whole chat is re-sent each turn. Speech costs pennies an hour on top. Prompt caching is on, which cuts
 repeated context to roughly a tenth for a few minutes after each turn.
@@ -134,3 +187,7 @@ repeated context to roughly a tenth for a few minutes after each turn.
   commands run in PowerShell.
 - The dashboard opens in Edge's app mode, which ships with Windows. `--browser` uses your default instead.
 - Chats, memory, settings and the scratch workspace stay on the machine, in files next to the code.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

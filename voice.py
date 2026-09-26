@@ -25,7 +25,7 @@ def listen(on_level=None, should_stop=None) -> str:
     silent_for = 0.0
     block = int(SAMPLE_RATE * 0.1)  # process audio in 0.1s pieces
 
-    with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32", device=6) as stream:
+    with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32", device=config.MIC_DEVICE) as stream:
         recorded = 0.0
         # Wait until the person actually starts talking (up to 8s), so leading
         # silence doesn't instantly end the recording.

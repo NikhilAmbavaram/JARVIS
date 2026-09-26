@@ -287,6 +287,19 @@ def stop_running():
         _kill_tree(process)
 
 
+def _looks_failed(text: str):
+    """Spot a failure the exit code missed. PowerShell reports 0 even when the
+    program it ran blew up, so the output itself has to be checked."""
+    low = text.lower()
+    if "traceback (most recent call last)" in low:
+        return "a Python traceback"
+    if re.search(r"\b[1-9]\d* (failed|errors?)\b", low):
+        return "failing tests"
+    if low.startswith("fatal:") or "\nfatal:" in low:
+        return "a fatal git error"
+    return None
+
+
 def _run_process(args: list, cwd: Path, timeout, env=None) -> str:
     global _running, _stopped_by_user
     timeout = max(5, min(int(timeout or 120), 900))
@@ -313,7 +326,16 @@ def _run_process(args: list, cwd: Path, timeout, env=None) -> str:
     text = output.decode("utf-8", errors="replace").replace("\r\n", "\n").strip()
     if len(text) > MAX_OUTPUT:
         text = text[:MAX_OUTPUT // 2] + f"\n… ({len(text) - MAX_OUTPUT} characters cut) …\n" + text[-MAX_OUTPUT // 2:]
-    return f"Exit code {process.returncode}{ending}, took {time.monotonic() - started:.1f} s.\n{text or '(no output)'}"
+    failed = _looks_failed(text)
+    if process.returncode == 0 and not failed:
+        verdict = "OK (exit code 0)"
+    elif process.returncode == 0:
+        verdict = f"FAILED: exit code 0, but the output contains {failed} — report this as a failure"
+    else:
+        verdict = f"FAILED: exit code {process.returncode}"
+        if failed:
+            verdict += f", and the output contains {failed}"
+    return f"{verdict}{ending}, took {time.monotonic() - started:.1f} s.\n{text or '(no output)'}"
 
 
 def run_command(command: str, folder: str = "", timeout: int = 120) -> str:
@@ -329,8 +351,11 @@ def run_command(command: str, folder: str = "", timeout: int = 120) -> str:
     if blocked:
         return blocked
     if os.name == "nt":
+        # PowerShell exits 0 even when the program it ran failed, so the real code is passed on
+        # by hand. The newline keeps a trailing comment in `command` from swallowing it.
         args = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
-                "$ProgressPreference = 'SilentlyContinue'; [Console]::OutputEncoding = [Text.Encoding]::UTF8; " + command]
+                "$ProgressPreference = 'SilentlyContinue'; [Console]::OutputEncoding = [Text.Encoding]::UTF8; "
+                + command + "\nif ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }"]
     else:
         args = ["bash", "-lc", command]
     return _run_process(args, cwd, timeout)
@@ -1659,10 +1684,12 @@ TOOL_SCHEMA = [
     {
         "name": "run_command",
         "description": (
-            "Run a PowerShell command on the user's Windows PC and get its output (exit code, then stdout and stderr "
-            "together). Use it for real work: compiling, running programs and tests, git, pip installs, checking the "
-            "system. The user sees the exact command and approves it first, so write it plainly, one task per call. "
-            "Commands can't answer prompts, so pass flags like -y. Dashboard only."
+            "Run a PowerShell command on the user's Windows PC and get its output. The first line is the verdict, "
+            "OK or FAILED, followed by stdout and stderr together. Never tell the user it worked when that line says "
+            "FAILED or the output holds a traceback or an error — quote the error instead. Use it for real work: "
+            "compiling, running programs and tests, git, pip installs, checking the system. The user sees the exact "
+            "command and approves it first, so write it plainly, one task per call. Commands can't answer prompts, "
+            "so pass flags like -y. Dashboard only."
         ),
         "input_schema": {
             "type": "object",
@@ -1678,7 +1705,9 @@ TOOL_SCHEMA = [
         "name": "run_python",
         "description": (
             "Run a Python script on the user's PC with Jarvis's own Python (numpy, requests and friends available), "
-            "after the user approves it, and get its output. Good for calculations, data work, quick experiments, and "
+            "after the user approves it, and get its output. The first line is the verdict, OK or FAILED; if it says "
+            "FAILED, or a traceback appears in the output, say so and quote the error rather than reporting success. "
+            "Good for calculations, data work, quick experiments, and "
             "making charts or files. Save pictures into the working folder (e.g. plt.savefig('chart.png')): new "
             "pictures appear in the chat automatically. Dashboard only."
         ),
