@@ -1,3 +1,7 @@
+
+
+https://github.com/user-attachments/assets/096bdabc-6b83-489b-bca0-fc9798d5df33
+
 # J.A.R.V.I.S
 
 **A voice assistant for Windows with a dry butler streak — and real reach into the machine it runs on.**
@@ -26,6 +30,14 @@ Python 3.13 · Claude API with tool use · OpenAI speech · FastAPI + WebSocket 
   GitHub uploads it and pastes a player link right here. Keep it to 60–90 seconds:
   wake word → a spoken question → a tool doing something real (git status or a screenshot)
   → an approval prompt → a long answer landing in the chat window.
+
+
+https://github.com/user-attachments/assets/5d44a31b-bad8-412e-bb8d-0576ef4ad508
+
+
+
+https://github.com/user-attachments/assets/5cb755fc-4b1b-4484-b9f3-0fe178e1aa92
+
 
   SCREENSHOT — Win+Shift+S, save as docs/dashboard.png, then uncomment:
 ![The dashboard](docs/dashboard.png)
