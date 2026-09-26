@@ -22,30 +22,7 @@ Python 3.13 · Claude API with tool use · OpenAI speech · FastAPI + WebSocket 
 
 ---
 
-## Demo
 
-<!--
-  DEMO VIDEO — drag the .mp4 straight into GitHub's web editor for this file
-  (github.com/NikhilAmbavaram/JARVIS → README.md → pencil icon → drop the file in).
-  GitHub uploads it and pastes a player link right here. Keep it to 60–90 seconds:
-  wake word → a spoken question → a tool doing something real (git status or a screenshot)
-  → an approval prompt → a long answer landing in the chat window.
-
-
-https://github.com/user-attachments/assets/5d44a31b-bad8-412e-bb8d-0576ef4ad508
-
-
-
-https://github.com/user-attachments/assets/5cb755fc-4b1b-4484-b9f3-0fe178e1aa92
-
-
-  SCREENSHOT — Win+Shift+S, save as docs/dashboard.png, then uncomment:
-![The dashboard](docs/dashboard.png)
--->
-
-*Demo video coming — drop it in the block above.*
-
----
 
 ## What it does
 
